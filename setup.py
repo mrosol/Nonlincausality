@@ -14,12 +14,12 @@ with open('README.md') as f:
     README = f.read()
 
 setuptools.setup(
-    author="Maciej Rosol",
+    author="Maciej Rosoł",
     author_email="mrosol5@gmail.com",
     name='nonlincausality',
     license="MIT",
     description='Python package for Granger causality test with nonlinear forecasting methods.',
-    version='v1.0.0',
+    version='v0.0.1',
     long_description=README,
     url='https://github.com/mrosol/nonlincausality',
     packages=setuptools.find_packages(),
@@ -32,8 +32,8 @@ setuptools.setup(
         'License :: OSI Approved :: MIT License',
         'Programming Language :: Python',
         'Programming Language :: Python :: 3.7',
-        'Topic :: Scientific/Engineering'
-        'Topic :: Scientific/Engineering :: Information Analysis'
+        'Topic :: Scientific/Engineering',
+        'Topic :: Scientific/Engineering :: Information Analysis',
         'Topic :: Software Development :: Libraries',
         'Topic :: Software Development :: Libraries :: Python Modules',
         'Intended Audience :: Developers',

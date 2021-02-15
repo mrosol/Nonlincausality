@@ -2,6 +2,7 @@
 Python package for Granger causality test with nonlinear forecasting methods.
 
 This package contains two types of functions. 
+
 The first type is an implementation of a modified Granger causality test based on grangercausalitytests function from statsmodels.tsa.stattools.
 As a Granger causality test is using linear regression for prediction it may not capture more complex causality relations.
 The first type of presented functions are using nonlinear forecasting methods (using recurrent neural networks or ARMIAX models) for prediction instead of linear regression. 

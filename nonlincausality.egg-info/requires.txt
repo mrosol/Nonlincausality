@@ -1,5 +1,0 @@
-scipy
-keras
-statsmodels
-tensorflow
-matplotlib

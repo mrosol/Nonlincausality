@@ -1,7 +1,7 @@
 # Nonlincausality
 Python package for Granger causality test with nonlinear forecasting methods.
 
-contact: mrosol5@gmail.com
+Contact: mrosol5@gmail.com
 
 This package contains two types of functions. 
 

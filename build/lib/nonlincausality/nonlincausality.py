@@ -2,8 +2,8 @@
 """
 @author: MSc. Maciej Rosoł
 contact: mrosol5@gmail.com
-Version 1.0.2
-Update: 15.02.2021
+Version 1.0.1
+Update: 09.02.2021
 """
 
 import numpy as np
@@ -33,8 +33,8 @@ The first type of function contains: nonlincausalityLSTM(), nonlincausalityGRU()
 The second type of functions is for measuring the change of causality during time.
 Those functions are using first type functions to create the forecasting models.
 They calculate the measure of the causality in a given time window 'w1' with a given step 'w2'.
-The measure of change of the causality during time is the sigmoid function of quotient of errors - 2/(1 + exp(-((RMSE_X/RMSE_XY)-1)))-1.
-Also the measure of the causality of the whole signal was applied as the logarithm of quotient of variances of errors - ln(var(error_X)/var(error_XY)).
+Two measures of causality were used. The first one is the logarithm of quotient of variances of errors - ln(var(error_X)/var(error_XY)),
+while the second measure is the sigmoid function of quotient of errors - 2/(1 + exp(-((RMSE_X/RMSE_XY)-1)))-1
 Those functions can operate with multiple time series and test causal relations for each pair of signals.
 The second type of function contains: nonlincausalitymeasureLSTM(), nonlincausalitymeasureGRU(), nonlincausalitymeasureNN() and nonlincausalitymeasureARIMAX().
 '''
@@ -1485,6 +1485,8 @@ def nonlincausalityARIMAX(x, maxlag, d, xtest=[], z=[], ztest=[],plot = False):
 
         X_test = xtest[lag:,0]
 
+        print(len(XpredX))
+        print(len(X_test))
         errorX = X_test-XpredX
         errorXY = X_test-XYpredX
         RSS1 = sum(errorX**2)

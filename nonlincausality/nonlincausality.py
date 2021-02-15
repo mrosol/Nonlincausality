@@ -2,8 +2,8 @@
 """
 @author: MSc. Maciej Rosoł
 contact: mrosol5@gmail.com
-Version 1.0.1
-Update: 09.02.2021
+Version 1.0.2
+Update: 15.02.2021
 """
 
 import numpy as np
@@ -1485,8 +1485,6 @@ def nonlincausalityARIMAX(x, maxlag, d, xtest=[], z=[], ztest=[],plot = False):
 
         X_test = xtest[lag:,0]
 
-        print(len(XpredX))
-        print(len(X_test))
         errorX = X_test-XpredX
         errorXY = X_test-XYpredX
         RSS1 = sum(errorX**2)

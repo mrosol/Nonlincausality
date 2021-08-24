@@ -2,7 +2,7 @@
 """
 @author: MSc. Maciej Rosoł
 contact: mrosol5@gmail.com
-Version 1.0.2
+Version 1.0.3
 Update: 15.02.2021
 """
 
@@ -879,7 +879,6 @@ def nonlincausalityGRU(x, maxlag, GRU_layers, GRU_neurons, run=1, Dense_layers=0
                          'RSS of models based only on X', 'RSS of models based on X and Y',
                          'index of the best model based on X', 'index of the best model based on X and Y',
                          'errors from model based on X','errors from model based on X and Y'])
-        tf.keras.backend.clear_session()
         
     return results
         
@@ -1193,9 +1192,12 @@ def nonlincausalityNN(x, maxlag, NN_config, NN_neurons, run=1, xtest=[], z=[], z
                         modelXY[r].add(Dense(NN_neurons[i], activation = 'relu')) # TODO changing activation function
                         in_shape = NN_neurons[i] # input shape for the next layer
                 elif n == 'l': # adding LSTM layer
-                    if i+1 == len(NN_config): # if it is the last layer
+                    if i+1 == len(NN_config)and i!=0: # if it is the last layer
                         modelX[r].add(LSTM(NN_neurons[i],input_shape=(in_shape,1), activation='tanh', recurrent_activation='tanh', use_bias=True, return_sequences = False))
                         modelXY[r].add(LSTM(NN_neurons[i],input_shape=(in_shape,1), activation='tanh', recurrent_activation='tanh', use_bias=True, return_sequences = False))
+                    elif i+1 == len(NN_config)and i==0: # if it is the only layer
+                        modelX[r].add(LSTM(NN_neurons[i],input_shape=(in_shape,dataX.shape[2]), activation='tanh', recurrent_activation='tanh', use_bias=True, return_sequences = False))
+                        modelXY[r].add(LSTM(NN_neurons[i],input_shape=(in_shape,dataXY.shape[2]), activation='tanh', recurrent_activation='tanh', use_bias=True, return_sequences = False))
                     elif 'l' in NN_config[i+1:] or 'g' in NN_config[i+1:] and i == 0: # if one of the next layers is LSTM or GRU and it is the first layer
                         modelX[r].add(LSTM(NN_neurons[i],input_shape=(dataX.shape[1],dataX.shape[2]), activation='tanh', recurrent_activation='tanh', use_bias=True, return_sequences = True))
                         modelXY[r].add(LSTM(NN_neurons[i],input_shape=(dataXY.shape[1],dataXY.shape[2]), activation='tanh', recurrent_activation='tanh', use_bias=True, return_sequences = True))
@@ -1213,9 +1215,12 @@ def nonlincausalityNN(x, maxlag, NN_config, NN_neurons, run=1, xtest=[], z=[], z
                         modelXY[r].add(LSTM(NN_neurons[i],input_shape=(in_shape,1), activation='tanh', recurrent_activation='tanh', use_bias=True, return_sequences = False))
                         in_shape = NN_neurons[i] # input shape for the next layer
                 elif n == 'g': # adding GRU layer
-                    if i+1 == len(NN_config): # if it is the last layer
+                    if i+1 == len(NN_config) and i != 0: # if it is the last layer
                         modelX[r].add(GRU(NN_neurons[i],input_shape=(in_shape,1), activation='tanh', recurrent_activation='tanh', use_bias=True, return_sequences = False))
                         modelXY[r].add(GRU(NN_neurons[i],input_shape=(in_shape,1), activation='tanh', recurrent_activation='tanh', use_bias=True, return_sequences = False))
+                    if i+1 == len(NN_config) and i == 0: # if it is the only layer
+                        modelX[r].add(GRU(NN_neurons[i],input_shape=(in_shape,dataX.shape[2]), activation='tanh', recurrent_activation='tanh', use_bias=True, return_sequences = False))
+                        modelXY[r].add(GRU(NN_neurons[i],input_shape=(in_shape,dataXY.shape[2]), activation='tanh', recurrent_activation='tanh', use_bias=True, return_sequences = False))
                     elif 'l' in NN_config[i+1:] or 'g' in NN_config[i+1:] and i == 0: # if one of the next layers is LSTM or GRU and it is the first layer
                         modelX[r].add(GRU(NN_neurons[i],input_shape=(dataX.shape[1],dataX.shape[2]), activation='tanh', recurrent_activation='tanh', use_bias=True, return_sequences = True))
                         modelXY[r].add(GRU(NN_neurons[i],input_shape=(dataXY.shape[1],dataXY.shape[2]), activation='tanh', recurrent_activation='tanh', use_bias=True, return_sequences = True))
@@ -1308,7 +1313,6 @@ def nonlincausalityNN(x, maxlag, NN_config, NN_neurons, run=1, xtest=[], z=[], z
                          'RSS of models based only on X', 'RSS of models based on X and Y',
                          'index of the best model based on X', 'index of the best model based on X and Y',
                          'errors from model based on X','errors from model based on X and Y'])
-        tf.keras.backend.clear_session()
     return results
         
 #%% ARIMAX 
@@ -1699,34 +1703,34 @@ def nonlincausalitymeasureLSTM(x, maxlag, w1, w2, LSTM_layers, LSTM_neurons, run
                     errorXY = X-XYpredX
                     
                     T = X.size
-                    VC = np.ones([math.ceil((T-w1)/w2)+1]) # initializing variable for the first causality measure
-                    VCX = np.ones([math.ceil((T-w1)/w2)+1]) # initializing variable for numbers of samples at the end of each step
+                    VC = np.ones([int(np.ceil((T)/w2))]) # initializing variable for the causality measure
+                    VCX = np.ones([int(np.ceil((T)/w2))]) # initializing variable for numbers of samples at the end of each step
                     all1 = False
-                    for n, k in enumerate(range(w1,T,w2)): # counting value of causality starting from moment w1 with step equal to w2 till the end of time series
-                        VC[n] = 2/(1 + math.exp(-(math.sqrt(statistics.mean(errorX[k-w1:k]**2))/math.sqrt(statistics.mean(errorXY[k-w1:k]**2))-1)))-1 # value of causality as a sigmoid function of quotient of errors
-                        VCX[n] = k
+                    for n, k in enumerate(range(0,T,w2)): # counting value of causality starting from moment w1 with step equal to w2 till the end of time series
+                        VC[n] = 2/(1 + np.exp(-(np.sqrt(np.mean(errorX[k-w1:k]**2))/np.sqrt(np.mean(errorXY[k-w1:k]**2))-1)))-1 # value of causality as a sigmoid function of quotient of errors
+                        VCX[n] = k-w1
                         if VC[n]<0: # if performance of modelX was better than performance of modelXY
                             VC[n] = 0 # that means there is no causality
                         if X[k]==X[-1]: # if the causality of the whole range of time series was calculated
                             all1=True # there is no need for further calculations
                     if all1==False: # otherwise calculations must be done for the end of the signal
-                        VC[-1] = 2/(1 + math.exp(-(math.sqrt(statistics.mean(errorX[-w1:]**2))/math.sqrt(statistics.mean(errorXY[-w1:]**2))-1)))-1
-                        VCX[-1] = T
+                        VC[-1] = 2/(1 + np.exp(-(np.sqrt(np.mean(errorX[-w1:]**2))/np.sqrt(np.mean(errorXY[-w1:]**2))-1)))-1
+                        VCX[-1] = T-w1
                         if VC[-1]<0:
                             VC[-1] = 0
                     print('i = ' +str(i)+', j = '+str(j)+', lag = '+str(lag))
                     if plot_res:
-                        plt.figure('lag '+str(lag)+'_'+ str(min([i,j]))+' and ' + str(max([i,j])))
+                        plt.figure('lag '+str(lag)+' '+ str(min([i,j]))+' and ' + str(max([i,j])))
                         plt.plot(VCX, VC)
                         if j<i and plot_with_xtest:
-                            plt.plot(range(0,T),xxtest[lag:,0],range(0,T),xxtest[lag:,1])
+                            plt.plot(range(0,T),xxtest[lag:,0],range(0,T),xxtest[lag:,1], alpha=0.5)
                             plt.legend([str(i)+'->'+str(j),str(j)+'->'+str(i),str(i),str(j)])
                         elif j<i:
                             plt.legend([str(i)+'->'+str(j),str(j)+'->'+str(i)])
 
-                    VCX_res[lag] = VCX
+                    VCX_res[lag] = VCX    
                     VC_res[lag] = VC
-                    VC2_res[lag] = math.log(statistics.variance(errorX)/statistics.variance(errorXY)) # value of causality for the whole signal
+                    VC2_res[lag] = np.log(np.var(errorX)/np.var(errorXY)) # value of causality for the whole signal
                     
                 results[str(i)+'->'+str(j)] = ([VC_res, VC2_res, VCX_res, res],['measure of change of causality', 'measure of causality for whole signal','numbers of samples at the end of the step','results from nonlincausalityLSTM function'])
                 
@@ -1913,34 +1917,34 @@ def nonlincausalitymeasureGRU(x, maxlag, w1, w2, GRU_layers, GRU_neurons, run=1,
                     errorXY = X-XYpredX
                     
                     T = X.size
-                    VC = np.ones([math.ceil((T-w1)/w2)+1]) # initializing variable for the first causality measure
-                    VCX = np.ones([math.ceil((T-w1)/w2)+1]) # initializing variable for numbers of samples at the end of each step
+                    VC = np.ones([int(np.ceil((T)/w2))]) # initializing variable for the causality measure
+                    VCX = np.ones([int(np.ceil((T)/w2))]) # initializing variable for numbers of samples at the end of each step
                     all1 = False
-                    for n, k in enumerate(range(w1,T,w2)): # counting value of causality starting from moment w1 with step equal to w2 till the end of time series
-                        VC[n] = 2/(1 + math.exp(-(math.sqrt(statistics.mean(errorX[k-w1:k]**2))/math.sqrt(statistics.mean(errorXY[k-w1:k]**2))-1)))-1 # value of causality as a sigmoid function of quotient of errors
-                        VCX[n] = k
+                    for n, k in enumerate(range(0,T,w2)): # counting value of causality starting from moment w1 with step equal to w2 till the end of time series
+                        VC[n] = 2/(1 + np.exp(-(np.sqrt(np.mean(errorX[k-w1:k]**2))/np.sqrt(np.mean(errorXY[k-w1:k]**2))-1)))-1 # value of causality as a sigmoid function of quotient of errors
+                        VCX[n] = k-w1
                         if VC[n]<0: # if performance of modelX was better than performance of modelXY
                             VC[n] = 0 # that means there is no causality
                         if X[k]==X[-1]: # if the causality of the whole range of time series was calculated
                             all1=True # there is no need for further calculations
                     if all1==False: # otherwise calculations must be done for the end of the signal
-                        VC[-1] = 2/(1 + math.exp(-(math.sqrt(statistics.mean(errorX[-w1:]**2))/math.sqrt(statistics.mean(errorXY[-w1:]**2))-1)))-1
-                        VCX[-1] = T
+                        VC[-1] = 2/(1 + np.exp(-(np.sqrt(np.mean(errorX[-w1:]**2))/np.sqrt(np.mean(errorXY[-w1:]**2))-1)))-1
+                        VCX[-1] = T-w1
                         if VC[-1]<0:
                             VC[-1] = 0
                     print('i = ' +str(i)+', j = '+str(j)+', lag = '+str(lag))
                     if plot_res:
-                        plt.figure('lag '+str(lag)+'_'+ str(min([i,j]))+' and ' + str(max([i,j])))
+                        plt.figure('lag '+str(lag)+' '+ str(min([i,j]))+' and ' + str(max([i,j])))
                         plt.plot(VCX, VC)
                         if j<i and plot_with_xtest:
-                            plt.plot(range(0,T),xxtest[lag:,0],range(0,T),xxtest[lag:,1])
+                            plt.plot(range(0,T),xxtest[lag:,0],range(0,T),xxtest[lag:,1], alpha=0.5)
                             plt.legend([str(i)+'->'+str(j),str(j)+'->'+str(i),str(i),str(j)])
                         elif j<i:
                             plt.legend([str(i)+'->'+str(j),str(j)+'->'+str(i)])
-                        
+
                     VCX_res[lag] = VCX    
                     VC_res[lag] = VC
-                    VC2_res[lag] = math.log(statistics.variance(errorX)/statistics.variance(errorXY)) # value of causality for the whole signal
+                    VC2_res[lag] = np.log(np.var(errorX)/np.var(errorXY)) # value of causality for the whole signal
                     
                 results[str(i)+'->'+str(j)] = ([VC_res, VC2_res, VCX_res, res],['measure of causality with sigmid function', 'measure of causality with logarithm','numbers of samples at the end of the step','results from nonlincausalityGRU function'])
 
@@ -2122,19 +2126,19 @@ def nonlincausalitymeasureNN(x, maxlag, w1, w2, NN_config, NN_neurons, run=1, xt
                     errorXY = X-XYpredX
 
                     T = X.size
-                    VC = np.ones([math.ceil((T-w1)/w2)+1]) # initializing variable for the causality measure
-                    VCX = np.ones([math.ceil((T-w1)/w2)+1]) # initializing variable for numbers of samples at the end of each step
+                    VC = np.ones([int(np.ceil((T)/w2))]) # initializing variable for the causality measure
+                    VCX = np.ones([int(np.ceil((T)/w2))]) # initializing variable for numbers of samples at the end of each step
                     all1 = False
-                    for n, k in enumerate(range(w1,T,w2)): # counting value of causality starting from moment w1 with step equal to w2 till the end of time series
-                        VC[n] = 2/(1 + math.exp(-(math.sqrt(statistics.mean(errorX[k-w1:k]**2))/math.sqrt(statistics.mean(errorXY[k-w1:k]**2))-1)))-1 # value of causality as a sigmoid function of quotient of errors
-                        VCX[n] = k
+                    for n, k in enumerate(range(0,T,w2)): # counting value of causality starting from moment w1 with step equal to w2 till the end of time series
+                        VC[n] = 2/(1 + np.exp(-(np.sqrt(np.mean(errorX[k-w1:k]**2))/np.sqrt(np.mean(errorXY[k-w1:k]**2))-1)))-1 # value of causality as a sigmoid function of quotient of errors
+                        VCX[n] = k-w1
                         if VC[n]<0: # if performance of modelX was better than performance of modelXY
                             VC[n] = 0 # that means there is no causality
                         if X[k]==X[-1]: # if the causality of the whole range of time series was calculated
                             all1=True # there is no need for further calculations
                     if all1==False: # otherwise calculations must be done for the end of the signal
-                        VC[-1] = 2/(1 + math.exp(-(math.sqrt(statistics.mean(errorX[-w1:]**2))/math.sqrt(statistics.mean(errorXY[-w1:]**2))-1)))-1
-                        VCX[-1] = T
+                        VC[-1] = 2/(1 + np.exp(-(np.sqrt(np.mean(errorX[-w1:]**2))/np.sqrt(np.mean(errorXY[-w1:]**2))-1)))-1
+                        VCX[-1] = T-w1
                         if VC[-1]<0:
                             VC[-1] = 0
                     print('i = ' +str(i)+', j = '+str(j)+', lag = '+str(lag))
@@ -2149,7 +2153,7 @@ def nonlincausalitymeasureNN(x, maxlag, w1, w2, NN_config, NN_neurons, run=1, xt
 
                     VCX_res[lag] = VCX    
                     VC_res[lag] = VC
-                    VC2_res[lag] = math.log(statistics.variance(errorX)/statistics.variance(errorXY)) # value of causality for the whole signal
+                    VC2_res[lag] = np.log(np.var(errorX)/np.var(errorXY)) # value of causality for the whole signal
                     
                 results[str(j)+'->'+str(i)] = ([VC_res, VC2_res, VCX_res, res],['measure of causality with sigmid function', 'measure of causality with logarithm','numbers of samples at the end of the step','results from nonlincausalityNN function'])
            
@@ -2262,8 +2266,8 @@ def nonlincausalitymeasureARIMAX(x, maxlag, w1, w2, d, xtest=[], z=[], ztest=[],
                     errorXY = X[1:]-XYpredX
                     
                     T = X.size
-                    VC = np.ones([math.ceil((T-w1)/w2)+1]) # initializing variable for the first causality measure
-                    VCX = np.ones([math.ceil((T-w1)/w2)+1]) # initializing variable for numbers of samples at the end of each step
+                    VC = np.ones([int(np.ceil((T)/w2))]) # initializing variable for the causality measure
+                    VCX = np.ones([int(np.ceil((T)/w2))]) # initializing variable for numbers of samples at the end of each step
                     all1 = False
                     for n, k in enumerate(range(w1,T,w2)): # counting value of causality starting from moment w1 with step equal to w2 till the end of time series
                         VC[n] = 2/(1 + math.exp(-(math.sqrt(statistics.mean(errorX[k-w1:k]**2))/math.sqrt(statistics.mean(errorXY[k-w1:k]**2))-1)))-1 # value of causality as a sigmoid function of quotient of errors

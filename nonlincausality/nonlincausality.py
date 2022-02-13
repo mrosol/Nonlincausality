@@ -1,2300 +1,2049 @@
 # -*- coding: utf-8 -*-
 """
-@author: MSc. Maciej Rosoł
-contact: mrosol5@gmail.com
-Version 1.0.3
-Update: 15.02.2021
+Created on Sun Jan 23 10:56:19 2022
+
+@author: Maciej Rosoł
+ 
+contact: mrosol5@gmail.com, maciej.rosol.dokt@pw.edu.pl
+
+Reference:
+Maciej Rosoł, Marcel Młyńczak, Gerard Cybulski,
+Granger causality test with nonlinear neural-network-based methods: Python package and simulation study.,
+Computer Methods and Programs in Biomedicine, Volume 216, 2022
+https://doi.org/10.1016/j.cmpb.2022.106669
+
+Version 1.1.1
+Update: 13.02.2022
 """
 
 import numpy as np
 import matplotlib.pyplot as plt
 import scipy.stats as stats
-import math
-import statistics
 import keras
-from keras import Sequential
-from keras.layers import Dense, LSTM, Dropout, GRU, TimeDistributed, Flatten
+from keras.layers import Dense, LSTM, Dropout, GRU, TimeDistributed, Flatten, Input
+from keras.models import Model
 from statsmodels.tsa.arima.model import ARIMA
-import tensorflow as tf
+from statsmodels.tsa.tsatools import lagmat2ds
 
-'''
-This package contains two types of functions. 
+from utils import (
+    check_input,
+    check_input_measure,
+    prepare_data,
+    calculate_pred_and_errors,
+    plot_predicted,
+    calculate_causality,
+    calculate_causality_over_time,
+    plot_causality_over_time_part1,
+    plot_causality_over_time_part2
+)
+from results import ResultsNonlincausality
 
-The first type is an implementation of a modified Granger causality test based on grangercausalitytests function from statsmodels.tsa.stattools.
-As a Granger causality test is using linear regression for prediction it may not capture more complex causality relations.
-The first type of presented functions are using nonlinear forecasting methods (using recurrent neural networks or ARMIAX models) for prediction instead of linear regression. 
-For each tested lag this function is creating 2 models. The first one is forecasting the present value of X based on n=current lag past values of X, 
-while the second model is forecasting the same value based on n=current lag past values of X and Y time series.
-If the prediction error of the second model is statistically significantly smaller than the error of the first model than it means that Y is G-causing X (Y->X).
-It is also possible to test conditional causality using those functions.
-The functions based on neural networks can test the causality on the given test set. 
-The first type of function contains: nonlincausalityLSTM(), nonlincausalityGRU(), nonlincausalityNN() and nonlincausalityARIMAX().
 
-The second type of functions is for measuring the change of causality during time.
-Those functions are using first type functions to create the forecasting models.
-They calculate the measure of the causality in a given time window 'w1' with a given step 'w2'.
-The measure of change of the causality during time is the sigmoid function of quotient of errors - 2/(1 + exp(-((RMSE_X/RMSE_XY)-1)))-1.
-Also the measure of the causality of the whole signal was applied as the logarithm of quotient of variances of errors - ln(var(error_X)/var(error_XY)).
-Those functions can operate with multiple time series and test causal relations for each pair of signals.
-The second type of function contains: nonlincausalitymeasureLSTM(), nonlincausalitymeasureGRU(), nonlincausalitymeasureNN() and nonlincausalitymeasureARIMAX().
-'''
-#%% LSTM
-def nonlincausalityLSTM(x, maxlag, LSTM_layers, LSTM_neurons, run=1, Dense_layers=0, Dense_neurons=[], xtest=[], z=[], ztest=[], add_Dropout=True, Dropout_rate=0.1, epochs_num=100, learning_rate=0.01, batch_size_num=32, verbose=True, plot=False):
-    
-    '''
-    This function is implementation of modified Granger causality test. Granger causality is using linear autoregression for testing causality.
-    In this function forecasting is made using LSTM neural network.    
-    Used model architecture:
-    1st LSTM layer -> (Droput) -> ... -> (1st Dense layer) -> (Dropout) -> Output Dense layer
-    *() - not obligatory
-    
+#%% Inside of the nonlincausality functions
+
+
+def run_nonlincausality(
+    network_architecture,
+    x,
+    maxlag,
+    Network_layers,
+    Network_neurons,
+    Dense_layers,
+    Dense_neurons,
+    x_test,
+    run,
+    z,
+    z_test,
+    add_Dropout,
+    Dropout_rate,
+    epochs_num,
+    learning_rate,
+    batch_size_num,
+    verbose,
+    plot,
+    functin_type,
+):
+    """
     Parameters
     ----------
-    x - numpy ndarray, where each column corresponds to one time series. The second column is the variable, that may cause the variable in the first column.
-    
-    maxlag - int, list, tuple or numpy ndarray. If maxlag is int, then test for causality is made for lags from 1 to maxlag.
-    If maxlag is list, tuple or numpy ndarray, then test for causality is made for every number of lags in maxlag.
-    
-    LSTM_layers - int, number of LSTM layers in the model. 
-    
-    LSTM_neurons - list, tuple or numpy.ndarray, where the number of elements should be equal to the number of LSTM layers specified in LSTM_layers. 
-    The first LSTM layer has the number of neurons equal to the first element in LSTM_neurns,
-    the second layer has the number of neurons equal to the second element in LSTM_neurons and so on.
-    
-    run - int, determines how many times a given neural network architecture will be trained to select the model that has found the best minimum of the cost function
-    
-    Dense_layers - int, number of Dense layers, besides the last one, which is the output layer.
-    
-    Dense_neurons - list, tuple or numpy.ndarray, where the number of elements should be equal to the number of Dense layers specified in Dense_layers. 
-    
-    xtest - numpy ndarray, where each column corresponds to one time series, as in the variable x. This data will be used for testing hypothesis. 
+    network_architecture : function
+        Function for creating the specified neural network models.
+    x : numpy.array
+        2D Array with 2 columns containing X and Y signals respectively. 
+        Using this function it is tested if Y->X.
+        This data is used for training the models.
+    maxlag : list, tuple, array or int
+        Collection of lags, for which the causality analysis will be conducted. 
+        Lag is a number of past values used for predictions.
+        If int then all integers from 1 to maxlag are used as lag.
+    Network_layers : int or list
+        Number of LSTM/GRU/MLP cells/layer or 
+        list specifing the architecture of the neural network (NN_config).
+    Network_neurons : list
+        List with the numbers of LSTM/GRU/MLP cells/neurons in each layer,
+        or list, that specifies the number of neurons/cells or dropout rate in each layer (NN_neurons).
+    Dense_layers : int
+        Number of Dense layers after LSTM layers. The default is 0.
+    Dense_neurons : list
+        List with the numbers of neurons in each fully-connecred layer. 
+        The default is [].
+    x_test : numpy.array
+        2D Array with 2 columns containing X and Y signals respectively. 
+        This data is used for testing the models. 
+        If it is [], then x is used for testing.
+        The default is [].
+    run : int
+        The number of repetitions of the neural network training processes to obtain the network that obtains the lowest RSS value. 
+        The default is 1.
+    z : numpy.array
+        2D array of the train dataset, each column is another exogenous signal for conditional causality testing.
+        The default is [].
+    z_test : numpy.array
+        2D array of the test dataset, each column is another exogenous signal for conditional causality testing.
+        The default is [].
+    add_Dropout : bool
+        Specifies whether dropout regularization should be applied.
+        The default is True.
+    Dropout_rate : float
+        Dropout rate - the number between 0 and 1.
+        The default is 0.1.
+    epochs_num : list or int
+        Number of epochs of training the models.
+        If it is list then the consecutive elements is corresponding to the consecutive values of learning rates in learning_rate.        
+        The default is 100.
+    learning_rate : list or int
+        Learning rates used in training process.
+        The default is 0.01.
+    batch_size_num : int
+        Number specifies the batch size. The default is 32.
+    verbose : bool
+        Specifies whether the learning process should be printed. The default is True.
+    plot : bool
+        Specifies whether the predicted values along with original signals should be plotted.
+        The default is False.
+    functin_type : string
+        Name of the function type - 'LSTM', 'GRU', 'MLP' or 'NN'.
 
-    z - numpy ndarray (or [] if not applied), where each column corresponds to one time series. This variable is for testing conditional causality. 
-    In this approach, the first model is forecasting the present value of X based on past values of X and z, while the second model is forecasting the same value based on the past of X, Y and z.
-    
-    ztest - numpy ndarray (or [] if not applied), where each column corresponds to one time series, as in the variable z. This data will be used for testing hypothesis. 
-
-    add_Dropout - boolean, if True, than Dropout layer is added after each LSTM and Dense layer, besides the output layer.
-    
-    Dropout_rate - float, parameter 'rate' for Dropout layer.
-    
-    epochs_num -  int or list, number of epochs used for fitting the model. If list, then the length should be equal to number of different learning rates used
-    
-    learning_rate - float or list, the applied learning rate for the training process. If list, then the length should be equal to the lenth of epochs_num list.
-    
-    batch_size_num -  int, number of batch size for fitting the model.
-    
-    verbose - boolean, if True, then results are shown after each lag. 
-    
-    plot - boolean, if True plots of original and predicted values are made after each lag.
-    
     Returns
     -------
-    results - dictionary, where the number of used lags is keys. Each key stores a list, which contains test results, models for prediction of X fitted only on X time series, 
-    models for prediction of X fitted on X and Y time series, history of fitting the first model, history of fitting the second model, RSS of models based only on X, RSS of models based on X and Y,
-    index of the best model based on X, index of the best model based on X and Y, errors from the best model based on X, errors from the best model based on X and Y
-    '''
-    
-    # Checking the data correctness
-    if type(x) is np.ndarray:
-        if np.array(x.shape).shape[0] !=2:
-            raise Exception('x has wrong shape.')
-        elif x.shape[1] !=2:
-            raise Exception('x should have 2 columns.')
-        elif True in np.isnan(x):
-            raise ValueError('There is some NaN in x.')
-        elif True in np.isinf(x):
-            raise ValueError('There is some infinity value in x.')
+    results : dictionary
+        Results of the causality analysis. Keys of the dictionary are lags for which analysis was conducted.
+        The dictionary values are of the ResultsNonlincausality class.
+
+    """
+    # Checking the correctness of the input arguments
+    check_input(
+        x,
+        maxlag,
+        Network_layers,
+        Network_neurons,
+        Dense_layers,
+        Dense_neurons,
+        x_test,
+        run,
+        z,
+        z_test,
+        add_Dropout,
+        Dropout_rate,
+        epochs_num,
+        learning_rate,
+        batch_size_num,
+        verbose,
+        plot,
+        functin_type,
+    )
+
+    # If maxlag is int the test is made for every integer  from 1 to maxlag
+    if isinstance(maxlag, int):
+        lags = range(1, maxlag + 1)
     else:
-        raise TypeError('x should be numpy ndarray.')
-    
-    # Checking if maxlag has correct type and values
-    if type(maxlag) is list or type(maxlag) is np.ndarray or type(maxlag) is tuple:
         lags = maxlag
-        for lag in lags:
-            if type(lag) is not int:
-                raise ValueError('Every element in maxlag should be a positive integer.')
-            elif lag<=0:
-                raise ValueError('Every element in maxlag should be a positive integer.')
-    elif type(maxlag) is int:
-        if maxlag>0:
-            lags = range(1,maxlag+1)
-        else:
-            raise ValueError('maxlag should be grater than 0.')
-    else:
-        raise TypeError('maxlag should be int, list, tuple or numpy ndarray.')
-        
-    # Checking if the number of LSTM layers is correct
-    if type(LSTM_layers) is not int:
-        raise TypeError('LSTM_layers should be a positive integer.')
-    if LSTM_layers<0:
-        raise ValueError('LSTM_layers sholud be a positive integer.')
+    # If there is no x_test data causality analysis is performed on x data
+    is_x_test = True
+    if len(x_test) == 0:
+        x_test = x
+        is_x_test = False
+    if len(z) > 0 and len(z_test) == 0 and is_x_test == False:
+        z_test = z
+    if isinstance(epochs_num, int):
+        epochs_num = [epochs_num]
+    if isinstance(learning_rate, int) or isinstance(learning_rate, float):
+        learning_rate = [learning_rate]
+    results = {}
 
-    # Checking if the number of LSTM neurons in each layer is correct
-    if type(LSTM_neurons) is list or type(LSTM_neurons) is np.ndarray or type(Dense_neurons) is tuple:
-        for LSTM_n in LSTM_neurons:
-            if type(LSTM_n) is not int:
-                raise TypeError('Every element in LSTM_neurons should be a positive integer.')
-            elif LSTM_n<=0:
-                raise ValueError('Every element in LSTM_neurons should be a positive integer.')
-        if len(np.shape(LSTM_neurons)) != 1:
-            raise Exception('LSTM_neurons should be one dimension array or list.')
-        elif len(LSTM_neurons) != LSTM_layers:
-            raise Exception('Number of elements in LSTM_neurons should be equal to value of LSTM_layers.')
-    else:
-        raise TypeError('LSTM_neurons should be list or numpy array.')
-        
-    # Checking if run has correct type and value
-    if type(run) is not int:
-        raise TypeError('run should be an integer.')
-    elif run<=0:
-        raise ValueError('run should be a positive integer.')
-        
-    # Checking if the number of Dense layers is correct
-    if type(Dense_layers) is not int:
-        raise TypeError('Dense_layers should be a positive integer.')
-    if Dense_layers<0:
-        raise ValueError('Dense_layers sholud be a positive integer.')
-    
-    # Checking if the number of Dense neurons in each layer is correct
-    elif type(Dense_neurons) is list or type(Dense_neurons) is np.ndarray or type(Dense_neurons) is tuple:
-        for Dense_n in Dense_neurons:
-            if type(Dense_n) is not int:
-                raise TypeError('Every element in Dense_neurons should be a positive integer.')
-            elif Dense_layers>0 and Dense_n<=0:
-                raise ValueError('Every element in Dense_neurons should be a positive integer.')
-        if len(np.shape(Dense_neurons)) != 1:
-            raise Exception('Dense_neurons should be one dimension array or list.')
-        elif len(Dense_neurons) != Dense_layers:
-            raise Exception('Number of elements in Dense_neurons should be equal to value of Dense_layers.')
-    else:
-        raise TypeError('Dense_neurons should be list or numpy array.')
-        
-    # Checking the test data correctness
-    isxtest = False
-    if type(xtest) is np.ndarray:
-        if np.array(xtest.shape).shape[0] !=2:
-            raise Exception('xtest has wrong shape.')
-        elif xtest.shape[1] !=2:
-            raise Exception('xtest has to many columns.')
-        elif True in np.isnan(xtest):
-            raise ValueError('There is some NaN in xtest.')
-        elif True in np.isinf(xtest):
-            raise ValueError('There is some infinity value in xtest.')
-        else:
-            isxtest = True
-    elif xtest==[]:
-        xtest = x
-    else:
-        raise TypeError('xtest should be numpy ndarray, or [].')  
-    
-    # Checking if z has correct type and values
-    if type(z) is np.ndarray:
-        if np.array(z.shape).shape[0] != 2:
-            raise Exception('z has wrong shape.')
-        elif z.shape[0] != x.shape[0]:
-            raise Exception('z should have the same length as x.')
-        elif True in np.isnan(z):
-            raise ValueError('There is some NaN in z.')
-        elif True in np.isinf(z):
-            raise ValueError('There is some infinity value in z.')
-    elif z != []:
-        raise TypeError('z should be numpy ndarray or [].')
-        
-    # Checking the z test data correctness
-    if type(ztest) is np.ndarray:
-        if ztest.shape[0] != xtest.shape[0]:
-            raise Exception('ztest should have the same length as xtest.')
-        elif True in np.isnan(ztest):
-            raise ValueError('There is some NaN in ztest.')
-        elif True in np.isinf(ztest):
-            raise ValueError('There is some infinity value in ztest.')
-    elif z!=[] and ztest==[] and isxtest==False:
-        ztest=z
-    elif z!=[] and ztest==[] and isxtest==True:
-        raise Exception('ztest should be set if xtest is different than [].')
-    elif ztest!=[]:
-        raise TypeError('ztest should be numpy ndarray, or [].')  
-        
-    # Checking if add_Dropout has correct type
-    if type(add_Dropout) is not bool:
-        raise TypeError('add_Dropout should be boolean.')
-    # Checking if Dropout_rate has correct type and value
-    if type(Dropout_rate) is not float:
-        raise TypeError('Dropout_rate should be float.')
-    else:
-        if Dropout_rate<0.0 or Dropout_rate>=1.0:
-            raise ValueError('Dropout_rate shold be greater than 0 and less than 1.')
-    
-    # Checking if epochs_num has correct type and value
-    if type(epochs_num) is not int and type(epochs_num) is not list:
-        raise TypeError('epochs_num should be a positive integer or list of positibe integers.')
-    elif type(epochs_num) is int:
-        if epochs_num<=0:
-            raise ValueError('epochs_num should be a positive integer or list of positibe integers.')
-        else:
-            epochs_num=[epochs_num]
-        if type(learning_rate) is list:
-                raise TypeError('If epochs_num is a int, then learning_rate also should be int or float not list.')      
-    elif type(epochs_num) is list:
-        for e in epochs_num:
-            if type(e) is not int:
-                raise TypeError('epochs_num should be a positive integer or list of positibe integers (or both).')
-            elif e<=0:
-                raise ValueError('epochs_num should be a positive integer or list of positibe integers (or both).')
-        if type(learning_rate) is not list:
-                raise TypeError('If epochs_num is a list, then learning_rate also should be a list.')
-    
-    # Checking if learning_rate has correct type and value
-    if type(learning_rate) is not int and type(learning_rate) is not float and type(learning_rate) is not list:
-        raise TypeError('learning_rate should be a positive integer or float or list of positibe integers or floats (or both).')
-    elif type(learning_rate) is int or type(learning_rate) is float:
-        if learning_rate<=0:
-            raise ValueError('learning_rate should be a positive integer or float or list of positibe integers or floats (or both).')
-        else:
-            learning_rate=[learning_rate]
-        if type(learning_rate) is  list:
-            raise TypeError('If learning_rate is int or float, then epochs_num should be int not list.')    
-    elif type(learning_rate) is list:
-        for lr in learning_rate:
-            if type(lr) is not int and type(lr) is not float:
-                raise TypeError('learning_rate should be a positive integer or float or list of positibe integers or floats (or both).')
-            elif lr<=0:
-                raise ValueError('learning_rate should be a positive integer or float or list of positibe integers or floats (or both).')
-        if type(epochs_num) is not list:
-            raise TypeError('If learning_rate is a list, then epochs_num also should be a list.')
-    
-    # Checking if batch_size_num has correct type and value
-    if type(batch_size_num) is not int: # or not np.isnan(batch_size_num) :
-        raise TypeError('batch_size_num should be an integer or NaN.')
-    elif type(batch_size_num) is int:
-        if batch_size_num<=0:
-            raise ValueError('batch_size_num should be a positive integer.')
-    
-    # Checking if verbose has correct type
-    if type(verbose) is not bool:
-        raise TypeError('verbose should be boolean.')
-    else:
-        verb = verbose
-        
-    # Checking if plot has correct type
-    if type(plot) is not bool:
-        raise TypeError('plot should be boolean.')
-    
-    # Number of samples in each time series
-    length = x.shape[0]
-    testlength = xtest.shape[0]
-    results = dict()
-    
-    # Creating LSTM neural network models and testing for casuality for every lag specified by maxlag
+    # Creating neural network models and testing
+    # for casuality for every lag specified by maxlag
     for lag in lags:
-        X = x[lag:,0] # signal, that will be forecasting
-        Xtest = xtest[lag:,0]
-        
-        # input data for model based only on X (and z if set)
-        if z!=[]:
-            xz= np.concatenate((z,x[:,0].reshape(x.shape[0],1)),axis=1)
-            dataX = np.zeros([x.shape[0]-lag,lag,xz.shape[1]]) # input matrix for training the model only with data from X time series
-            for i in range(length-lag):
-                dataX[i,:,:]=xz[i:i+lag,:]    # each row is lag number of values before the value in corresponding row in X    
-        else:
-            dataX = np.zeros([x.shape[0]-lag,lag]) # input matrix for training the model only with data from X time series
-            for i in range(length-lag):
-                dataX[i,:]=x[i:i+lag,0]    # each row is lag number of values before the value in corresponding row in X
-            dataX = dataX.reshape(dataX.shape[0],dataX.shape[1],1) # reshaping the data to meet the requirements of the model
-        
-        # input data for model based on X and Y (and z if set)
-        if z!=[]:
-            xz= np.concatenate((z,x),axis=1)
-        else:
-            xz=x
-        dataXY = np.zeros([xz.shape[0]-lag,lag,xz.shape[1]]) # input matrix for training the model with data from X and Y time series
-        for i in range(length-lag):
-            dataXY[i,:,:] = xz[i:i+lag,:] # in each row there is lag number of values of X and lag number of values of Y before the value in corresponding row in X
-    
-        # test data for model based only on X (and z if set)
-        if z!=[]:
-            xztest= np.concatenate((ztest,xtest[:,0].reshape(xtest.shape[0],1)),axis=1)
-            dataXtest = np.zeros([xztest.shape[0]-lag,lag,xztest.shape[1]]) # input matrix for training the model only with data from X time series
-            for i in range(testlength-lag):
-                dataXtest[i,:,:]=xztest[i:i+lag,:]    # each row is lag number of values before the value in corresponding row in X
-        else:
-            dataXtest = np.zeros([xtest.shape[0]-lag,lag]) # input matrix for testing the model only with data from X time series
-            for i in range(xtest.shape[0]-lag):
-                dataXtest[i,:]=xtest[i:i+lag,0]    # each row is lag number of values before the value in corresponding row in X
-            dataXtest = dataXtest.reshape(dataXtest.shape[0],dataXtest.shape[1],1) # reshaping the data to meet the requirements of the model
-        
-        # test testing data for model based on X and Y (and z if set)
-        if z!=[]:
-            xztest= np.concatenate((ztest,xtest),axis=1)
-        else:
-            xztest=xtest
-        dataXYtest = np.zeros([xztest.shape[0]-lag,lag,xztest.shape[1]]) # input matrix for training the model with data from X and Y time series
-        for i in range(testlength-lag):
-            dataXYtest[i,:,:] = xztest[i:i+lag,:] # in each row there is lag number of values of X and lag number of values of Y before the value in corresponding row in X
-    
-        modelX = {}
-        modelXY = {}
-        RSSX = []
-        RSSXY = []
-        historyX = {}
-        historyXY = {}
-        for r in range(run):
-            
-            modelX[r] = Sequential() # creating Sequential model, which will use only data from X time series to forecast X.
-            historyX[r] = []
-            historyXY[r] = []
-            if LSTM_layers == 1: # If there is only one LSTM layer, than return_sequences should be false
-                modelX[r].add(LSTM(LSTM_neurons[0],input_shape=(dataX.shape[1],dataX.shape[2]), activation='tanh', recurrent_activation='tanh', use_bias=True, return_sequences = False))
-            else: # For many LSTM layers return_sequences should be True, to conncect layers with each other
-                modelX[r].add(LSTM(LSTM_neurons[0],input_shape=(dataX.shape[1],dataX.shape[2]), activation='tanh', recurrent_activation='tanh', use_bias=True, return_sequences = True))
-            if add_Dropout: # adding Dropout
-                modelX[r].add(Dropout(Dropout_rate))
-            
-            for lstml in range(1,LSTM_layers):  # adding next LSTM layers
-                if lstml == LSTM_layers-1:
-                    modelX[r].add(LSTM(LSTM_neurons[lstml],input_shape=(LSTM_neurons[lstml-1],1), activation='tanh', recurrent_activation='tanh', use_bias=True))
-                else:
-                    modelX[r].add(LSTM(LSTM_neurons[lstml],input_shape=(LSTM_neurons[lstml-1],1), activation='tanh', recurrent_activation='tanh', use_bias=True))
-                if add_Dropout: # adding Dropout
-                    modelX[r].add(Dropout(Dropout_rate))
-            
-            for densel in range(Dense_layers): # adding Dense layers if asked
-                modelX[r].add(Dense(Dense_neurons[densel],activation = 'relu'))
-                if add_Dropout: # adding Dropout
-                    modelX[r].add(Dropout(Dropout_rate))
-                    
-            modelX[r].add(Dense(1,activation = 'linear')) # adding output layer
-            
-            modelXY[r] = Sequential()# creating Sequential model, which will use data from X and Y time series to forecast X.
-            
-            if LSTM_layers == 1: # If there is only one LSTM layer, than return_sequences should be false
-                modelXY[r].add(LSTM(LSTM_neurons[0],input_shape=(dataXY.shape[1],dataXY.shape[2]), activation='tanh', recurrent_activation='tanh', use_bias=True, return_sequences = False))
-            else: # For many LSTM layers return_sequences should be True, to conncect layers with each other
-                modelXY[r].add(LSTM(LSTM_neurons[0],input_shape=(dataXY.shape[1],dataXY.shape[2]), activation='tanh', recurrent_activation='tanh', use_bias=True, return_sequences = True))
-            if add_Dropout: # adding Dropout
-                modelXY[r].add(Dropout(Dropout_rate))
-            
-            for lstml in range(1,LSTM_layers):  # adding next LSTM layers
-                if lstml == LSTM_layers-1:
-                    modelXY[r].add(LSTM(LSTM_neurons[lstml],input_shape=(LSTM_neurons[lstml-1],1), activation='tanh', recurrent_activation='tanh', use_bias=True))
-                else:
-                    modelXY[r].add(LSTM(LSTM_neurons[lstml],input_shape=(LSTM_neurons[lstml-1],1), activation='tanh', recurrent_activation='tanh', use_bias=True))
-                if add_Dropout: # adding Dropout
-                    modelXY[r].add(Dropout(Dropout_rate))
-            
-            for densel in range(Dense_layers): # adding Dense layers if asked
-                modelXY[r].add(Dense(Dense_neurons[densel],activation = 'relu'))
-                if add_Dropout: # adding Dropout
-                    modelXY[r].add(Dropout(Dropout_rate))
-                    
-            modelXY[r].add(Dense(1,activation = 'linear')) # adding output layer
+        result_lag = ResultsNonlincausality()
+        # Train signal, that will be forecasting
+        X = x[lag:, 0]
+        # Test signal, that will be forecasting
+        X_test = x_test[lag:, 0]
 
+        # Preparing the input data (train and test) for 2 models
+        data_X, data_XY, data_X_test, data_XY_test = prepare_data(
+            x, x_test, lag, z, z_test
+        )
+
+        # It is possible to train several models and choose models
+        # with the smallest RSS
+        for r in range(run):
+            history_X = []
+            history_XY = []
+
+            if functin_type in ["LSTM", "GRU"]:
+                # Creating model based only on past values of X
+                model_X = network_architecture(
+                    Network_layers,
+                    Network_neurons,
+                    Dense_layers,
+                    Dense_neurons,
+                    add_Dropout,
+                    Dropout_rate,
+                    data_X.shape,
+                )
+                # Creating model based on past values of X and Y
+                model_XY = network_architecture(
+                    Network_layers,
+                    Network_neurons,
+                    Dense_layers,
+                    Dense_neurons,
+                    add_Dropout,
+                    Dropout_rate,
+                    data_XY.shape,
+                )
+            elif functin_type == "MLP":
+                model_X = network_architecture(
+                    Dense_layers, Dense_neurons, add_Dropout, Dropout_rate, data_X.shape
+                )
+                model_XY = network_architecture(
+                    Dense_layers,
+                    Dense_neurons,
+                    add_Dropout,
+                    Dropout_rate,
+                    data_XY.shape,
+                )
+            else:
+                model_X = network_architecture(
+                    Network_layers, Network_neurons, data_X.shape
+                )
+                model_XY = network_architecture(
+                    Network_layers, Network_neurons, data_XY.shape
+                )
+            # Training models for specified number of epochs and learning rate
             for i, e in enumerate(epochs_num):
                 opt = keras.optimizers.Adam(learning_rate=learning_rate[i])
-                modelX[r].compile(optimizer=opt,
-                            loss='mean_squared_error',
-                            metrics=['mse'])
-                historyX[r].append(modelX[r].fit(dataX, X, epochs = e, batch_size = batch_size_num, verbose = verbose))
+                model_X.compile(
+                    optimizer=opt, loss="mean_squared_error", metrics=["mse"]
+                )
+                history_X.append(
+                    model_X.fit(
+                        data_X, X, epochs=e, batch_size=batch_size_num, verbose=verbose
+                    )
+                )
 
-                modelXY[r].compile(optimizer=opt,
-                            loss='mean_squared_error',
-                            metrics=['mse'])
-            
-                historyXY[r].append(modelXY[r].fit(dataXY, X, epochs = e, batch_size = batch_size_num, verbose = verbose))
+                model_XY.compile(
+                    optimizer=opt, loss="mean_squared_error", metrics=["mse"]
+                )
 
-            XpredX = modelX[r].predict(dataXtest) # prediction of X based on past of X
-            XpredX = XpredX.reshape(XpredX.size)
-            errorX = Xtest-XpredX
-            
-            XYpredX = modelXY[r].predict(dataXYtest)  # forecasting X based on the past of X and Y
-            XYpredX = XYpredX.reshape(XYpredX.size)
-            errorXY = Xtest-XYpredX
-                
-            RSSX.append(sum(errorX**2))
-            RSSXY.append(sum(errorXY**2))
-        
-        idx_bestX = RSSX.index(min(RSSX))
-        idx_bestXY = RSSXY.index(min(RSSXY))
-        
-        best_modelX = modelX[idx_bestX]
-        best_modelXY = modelXY[idx_bestXY]
-        
-        # Testing for statistically smaller forecast error for the model, which include X and Y      
-        # Wilcoxon Signed Rank Test test
-        XpredX = best_modelX.predict(dataXtest)
-        XpredX = XpredX.reshape(XpredX.size)
-        XYpredX = best_modelXY.predict(dataXYtest)
-        XYpredX = XYpredX.reshape(XYpredX.size)
+                history_XY.append(
+                    model_XY.fit(
+                        data_XY, X, epochs=e, batch_size=batch_size_num, verbose=verbose
+                    )
+                )
+            # Calculating predictions and errors for both models
+            XpredX, XYpredX, error_X, error_XY = calculate_pred_and_errors(
+                X_test, data_X_test, data_XY_test, model_X, model_XY
+            )
+            # Appending RSS, models, history of training and prediction errors to results object
+            result_lag.append_results(
+                sum(error_X ** 2),
+                sum(error_XY ** 2),
+                model_X,
+                model_XY,
+                history_X,
+                history_XY,
+                error_X,
+                error_XY,
+            )
+        # Indexed of models with the smallest RSS
+        idx_bestX = result_lag.RSS_X_all.index(min(result_lag.RSS_X_all))
+        idx_bestXY = result_lag.RSS_XY_all.index(min(result_lag.RSS_XY_all))
 
-        errorX = Xtest-XpredX
-        errorXY = Xtest-XYpredX
+        result_lag.set_best_results(idx_bestX, idx_bestXY)
 
-        S, p_value = stats.wilcoxon(np.abs(errorX),np.abs(errorXY),alternative='greater')
-        
-        # Printing the tests results and plotting effects of forecasting
-        print("Statistics value =", S,"p-value =", p_value)
+        # Testing if model using both X and Y has statistically smaller error,
+        # than model using only X (if there is causality Y->X)
+        # using Wilcoxon Signed Rank Test test
+        XpredX, XYpredX, error_X, error_XY = calculate_pred_and_errors(
+            X_test,
+            data_X_test,
+            data_XY_test,
+            result_lag.best_model_X,
+            result_lag.best_model_XY,
+        )
+
+        S, p_value = stats.wilcoxon(
+            np.abs(error_X), np.abs(error_XY), alternative="greater"
+        )
+
+        result_lag.p_value = p_value
+        result_lag.test_statistic = S
+
+        # Printing the tests results
+        print("Statistics value =", S, "p-value =", p_value)
+        # Plotting the original X test signal along with the predicted values
         if plot:
-            XpredX = best_modelX.predict(dataXtest)
-            XYpredX = best_modelXY.predict(dataXYtest)
-            plt.figure(figsize=(10,7))
-            plt.plot(Xtest)
-            plt.plot(XpredX)
-            plt.plot(XYpredX)
-            plt.legend(['X','Pred. based on X','Pred. based on X and Y'])
-            plt.xlabel('Number of sample')
-            plt.ylabel('Predicted value')
-            plt.title('Lags:'+str(lag))
-            plt.show()
-            
-        test_results = {"Wilcoxon test": ([S, p_value],['Statistics value', 'p-value'])}
-        results[lag] = ([test_results, modelX, modelXY, historyX, historyXY, RSSX, 
-                         RSSXY, idx_bestX, idx_bestXY, errorX, errorXY],
-                        ['test results','models based on X', 'models based on X and Y', 
-                         'history of fitting models based on X', 'history of fitting models based on X and Y', 
-                         'RSS of models based only on X', 'RSS of models based on X and Y',
-                         'index of the best model based on X', 'index of the best model based on X and Y',
-                         'errors from the best model based on X','errors from the best model based on X and Y'])
-    return  results
+            plot_predicted(X_test, XpredX, XYpredX, lag)
+        results[lag] = result_lag
+        
+    return results
+
+
+#%% LSTM
+def LSTM_architecture(
+    LSTM_layers,
+    LSTM_neurons,
+    Dense_layers,
+    Dense_neurons,
+    add_Dropout,
+    Dropout_rate,
+    data_shape,
+):
+    """
+    Parameters
+    ----------
+    LSTM_layers : int
+        Number of LSTM layers
+    LSTM_neurons : list
+        List with the numbers of LSTM cells in each LSTM layer
+    Dense_layers : int
+        Number of Dense layers after LSTM layers.
+    Dense_neurons : list
+        List with the numbers of neurons in each fully-connecred layer
+    add_Dropout : bool
+        Specifies whether dropout regularization should be applied
+    Dropout_rate : float
+        Dropout rate - the number between 0 and 1
+    data_shape : tuple
+        Shape of the training data
+
+    Returns
+    -------
+    model : keras.engine.training.Model
+        Model with the specified architecture
+
+    """
+    # data_shape[1] - lag, data_shape[2] - number of signals
+    input_layer = Input((data_shape[1], data_shape[2]))
+
+    # If there is only one LSTM layer, than return_sequences should be false
+    if LSTM_layers == 1:
+        layers_lstm = LSTM(
+            LSTM_neurons[0],
+            activation="tanh",
+            recurrent_activation="tanh",
+            use_bias=True,
+            return_sequences=False,
+        )(input_layer)
+    # For many LSTM layers return_sequences should be True, to conncect layers with each other
+    else:
+        layers_lstm = input_layer
+        # Adding LSTM layers
+        for lstml in range(0, LSTM_layers - 1):
+            layers_lstm = LSTM(
+                LSTM_neurons[lstml],
+                activation="tanh",
+                recurrent_activation="tanh",
+                use_bias=True,
+                return_sequences=True,
+            )(layers_lstm)
+            # Adding Dropout
+            if add_Dropout:
+                layers_lstm = Dropout(Dropout_rate)(layers_lstm)
+        # Adding last LSTM layer
+        layers_lstm = LSTM(
+            LSTM_neurons[-1],
+            activation="tanh",
+            recurrent_activation="tanh",
+            use_bias=True,
+            return_sequences=False,
+        )(layers_lstm)
+        # Adding Dropout
+        if add_Dropout:
+            layers_lstm = Dropout(Dropout_rate)(layers_lstm)
+    # Adding Dense layers if asked
+    for densel in range(Dense_layers):
+        layers_lstm = Dense(Dense_neurons[densel], activation="relu")(layers_lstm)
+        # Adding Dropout
+        if add_Dropout:
+            layers_lstm = Dropout(Dropout_rate)(layers_lstm)
+    # Adding output layer
+    output = Dense(1, activation="linear")(layers_lstm)
+
+    model = Model(inputs=input_layer, outputs=output)
+
+    return model
+
+
+def nonlincausalityLSTM(
+    x,
+    maxlag,
+    LSTM_layers,
+    LSTM_neurons,
+    Dense_layers=0,
+    Dense_neurons=[],
+    x_test=[],
+    run=1,
+    z=[],
+    z_test=[],
+    add_Dropout=True,
+    Dropout_rate=0.1,
+    epochs_num=100,
+    learning_rate=0.01,
+    batch_size_num=32,
+    verbose=True,
+    plot=False,
+):
+    """
+    Parameters
+    ----------
+    x : numpy.array
+        2D Array with 2 columns containing X and Y signals respectively. 
+        Using this function it is tested if Y->X.
+        This data is used for training the models.
+    maxlag : list, tuple, array or int
+        Collection of lags, for which the causality analysis will be conducted. 
+        Lag is a number of past values used for predictions.
+        If int then all integers from 1 to maxlag are used as lag.
+    LSTM_layers : int
+        Number of LSTM layers
+    LSTM_neurons : list
+        List with the numbers of LSTM cells in each LSTM layer.
+    Dense_layers : int, optional
+        Number of Dense layers after LSTM layers. The default is 0.
+    Dense_neurons : list, optional
+        List with the numbers of neurons in each fully-connecred layer. 
+        The default is []. 
+    x_test : numpy.array, optional
+        2D Array with 2 columns containing X and Y signals respectively. 
+        This data is used for testing the models. 
+        If it is [], then x is used for testing.
+        The default is [].
+    run : int, optional
+        The number of repetitions of the neural network training processes to obtain the network that obtains the lowest RSS value. 
+        The default is 1.
+    z : numpy.array, optional
+        2D array of the train dataset, each column is another exogenous signal for conditional causality testing.
+        The default is [].
+    z_test : numpy.array, optional
+        2D array of the test dataset, each column is another exogenous signal for conditional causality testing.
+        The default is [].
+    add_Dropout : bool, optional
+        Specifies whether dropout regularization should be applied.
+        The default is True.
+    Dropout_rate : float
+        Dropout rate - the number between 0 and 1.
+        The default is 0.1.
+    epochs_num : list or int, optional
+        Number of epochs of training the models.
+        If it is list then the consecutive elements is corresponding to the consecutive values of learning rates in learning_rate.        
+        The default is 100.
+    learning_rate : list or int, optional
+        Learning rates used in training process.
+        The default is 0.01.
+    batch_size_num : int, optional
+        Number specifies the batch size. The default is 32.
+    verbose : bool, optional
+        Specifies whether the learning process should be printed. The default is True.
+    plot : bool, optional
+        Specifies whether the predicted values along with original signals should be plotted.
+        The default is False.
+
+    Returns
+    -------
+    results : dictionary
+        Results of the causality analysis. Keys of the dictionary are lags for which analysis was conducted.
+        The dictionary values are of the ResultsNonlincausality class.
+
+    """
+
+    results = run_nonlincausality(
+        LSTM_architecture,
+        x,
+        maxlag,
+        LSTM_layers,
+        LSTM_neurons,
+        Dense_layers,
+        Dense_neurons,
+        x_test,
+        run,
+        z,
+        z_test,
+        add_Dropout,
+        Dropout_rate,
+        epochs_num,
+        learning_rate,
+        batch_size_num,
+        verbose,
+        plot,
+        "LSTM",
+    )
+
+    return results
+
 
 #%% GRU
-
-def nonlincausalityGRU(x, maxlag, GRU_layers, GRU_neurons, run=1, Dense_layers=0, Dense_neurons=[], xtest=[], z=[], ztest=[], add_Dropout=True, Dropout_rate=0.1, epochs_num=100, learning_rate=0.01, batch_size_num=32, verbose=True, plot=False):
-    
-    '''
-    This function is implementation of modified Granger causality test. Granger causality is using linear autoregression for testing causality.
-    In this function forecasting is made using GRU neural network.
-    
-    Used model:
-    1st GRU layer -> (Droput) ->  ... ->  (1st Dense layer) -> (Dropout) ->  ... -> Output Dense layer
-    *() - not obligatory
-    
+def GRU_architecture(
+    GRU_layers,
+    GRU_neurons,
+    Dense_layers,
+    Dense_neurons,
+    add_Dropout,
+    Dropout_rate,
+    data_shape,
+):
+    """
     Parameters
     ----------
-    x - numpy ndarray, where each column corresponds to one time series. 
-    
-    maxlag - int, list, tuple or numpy ndarray. If maxlag is int, then test for causality is made for lags from 1 to maxlag.
-    If maxlag is list, tuple or numpy ndarray, then test for causality is made for every number of lags in maxlag.
-    
-    GRU_layers - int, number of GRU layers in the model. 
-    
-    GRU_neurons - list, tuple or numpy array, where the number of elements should be equal to the number of GRU layers specified in GRU_layers. The First GRU layer has the number of neurons equal to the first element in GRU_neurns,
-    the second layer has the number of neurons equal to the second element in GRU_neurons and so on.
-    
-    run - int, determines how many times a given neural network architecture will be trained to select the model that has found the best minimum of the cost function
+    GRU_layers : int
+        Number of GRU layers.
+    GRU_neurons : list
+        List with the numbers of GRU cells in each GRU layer.
+    Dense_layers : int
+        Number of Dense layers after GRU layers.
+    Dense_neurons : list
+        List with the numbers of neurons in each fully-connecred layer.
+    add_Dropout : bool
+        Specifies whether dropout regularization should be applied.
+    Dropout_rate : float
+        Dropout rate - the number between 0 and 1.
+    data_shape : tuple
+        Shape of the training data.
 
-    Dense_layers - int, number of Dense layers, besides the last one, which is the output layer.
-    
-    Dense_neurons - list, tuple or numpy array, where the number of elements should be equal to the number of Dense layers specified in Dense_layers. 
-    
-    xtest - numpy ndarray, where each column corresponds to one time series, as in the variable x. This data will be used for testing hypothesis. 
-
-    z - numpy ndarray (or [] if not applied), where each column corresponds to one time series. This variable is for testing conditional causality. 
-    In this approach, the first model is forecasting the present value of X based on past values of X and z, while the second model is forecasting the same value based on the past of X, Y and z.
-    
-    ztest - numpy ndarray (or [] if not applied), where each column corresponds to one time series, as in the variable z. This data will be used for testing hypothesis. 
-
-    add_Dropout - boolean, if True, than Dropout layer is added after each GRU and Dense layer, besides the output layer.
-    
-    Dropout_rate - float, parameter 'rate' for Dropout layer.
-    
-    epochs_num -  int or list, number of epochs used for fitting the model. If list, then the length should be equal to number of different learning rates used
-    
-    learning_rate - float or list, the applied learning rate for the training process. If list, then the length should be equal to the lenth of epochs_num list.
-    
-    batch_size_num -  int, number of batch size for fitting the model.
-    
-    verbose - boolean, if True, then results are shown after each lag. 
-    
-    plot - boolean, if True plots of original and predicted values are made after each lag.
-    
     Returns
     -------
-    results - dictionary, where the number of used lags is keys. Each key stores a list, which contains test results, models for prediction of X fitted only on X time series, 
-    models for prediction of X fitted on X and Y time series, history of fitting the first model, history of fitting the second model, RSS of models based only on X, RSS of models based on X and Y,
-    index of the best model based on X, index of the best model based on X and Y, errors from the best model based on X, errors from the best model based on X and Y
-    '''
-    
-    # Checking the data correctness
-    if type(x) is np.ndarray:
-        if np.array(x.shape).shape[0] !=2:
-            raise Exception('x has wrong shape.')
-        elif x.shape[1] !=2:
-            raise Exception('x should have 2 columns.')
-        elif True in np.isnan(x):
-            raise ValueError('There is some NaN in x.')
-        elif True in np.isinf(x):
-            raise ValueError('There is some infinity value in x.')
+    model : keras.engine.training.Model
+        Model with the specified architecture.
+
+    """
+    # data_shape[1] - lag, data_shape[2] - number of signals
+    input_layer = Input((data_shape[1], data_shape[2]))
+
+    # If there is only one GRU layer, than return_sequences should be false
+    if GRU_layers == 1:
+        layers_gru = GRU(
+            GRU_neurons[0],
+            activation="tanh",
+            recurrent_activation="tanh",
+            use_bias=True,
+            return_sequences=False,
+        )(input_layer)
+    # For many GRU layers return_sequences should be True, to conncect layers with each other
     else:
-        raise TypeError('x should be numpy ndarray.')
-    
-    # Checking if maxlag has correct type and values
-    if type(maxlag) is list or type(maxlag) is np.ndarray or type(maxlag) is tuple:
-        lags = maxlag
-        for lag in lags:
-            if type(lag) is not int:
-                raise ValueError('Every element in maxlag should be a positive integer.')
-            elif lag<=0:
-                raise ValueError('Every element in maxlag should be a positive integer.')
-    elif type(maxlag) is int:
-        if maxlag>0:
-            lags = range(1,maxlag+1)
-        else:
-            raise ValueError('maxlag should be grater than 0.')
-    else:
-        raise TypeError('maxlag should be int, list, tuple or numpy ndarray.')
-        
-    # Checking if the number of GRU layers is correct
-    if type(GRU_layers) is not int:
-        raise TypeError('GRU_layers should be a positive integer.')
-    if GRU_layers<0:
-        raise ValueError('GRU_layers sholud be a positive integer.')
+        layers_gru = input_layer
+        # Adding GRU layers
+        for grul in range(0, GRU_layers - 1):
+            layers_gru = GRU(
+                GRU_neurons[grul],
+                activation="tanh",
+                recurrent_activation="tanh",
+                use_bias=True,
+                return_sequences=True,
+            )(layers_gru)
+            # Adding Dropout
+            if add_Dropout:
+                layers_gru = Dropout(Dropout_rate)(layers_gru)
+        # Adding last GRU layer
+        layers_gru = GRU(
+            GRU_neurons[-1],
+            activation="tanh",
+            recurrent_activation="tanh",
+            use_bias=True,
+            return_sequences=False,
+        )(layers_gru)
+        # Adding Dropout
+        if add_Dropout:
+            layers_gru = Dropout(Dropout_rate)(layers_gru)
+    # Adding Dense layers if asked
+    for densel in range(Dense_layers):
+        layers_gru = Dense(Dense_neurons[densel], activation="relu")(layers_gru)
+        # Adding Dropout
+        if add_Dropout:
+            layers_gru = Dropout(Dropout_rate)(layers_gru)
+    # Adding output layer
+    output = Dense(1, activation="linear")(layers_gru)
 
-    # Checking if the number of GRU neurons in each layer is correct
-    if type(GRU_neurons) is list or type(GRU_neurons) is np.ndarray or type(GRU_neurons) is tuple:
-        for GRU_n in GRU_neurons:
-            if type(GRU_n) is not int:
-                raise TypeError('Every element in GRU_neurons should be a positive integer.')
-            elif GRU_n<=0:
-                raise ValueError('Every element in GRU_neurons should be a positive integer.')
-        if len(np.shape(GRU_neurons)) != 1:
-            raise Exception('GRU_neurons should be one dimension array or list.')
-        elif len(GRU_neurons) != GRU_layers:
-            raise Exception('Number of elements in GRU_neurons should be equal to value of GRU_layers.')
-    else:
-        raise TypeError('GRU_neurons should be list or numpy array.')
-    
-    # Checking if run has correct type and value
-    if type(run) is not int:
-        raise TypeError('run should be an integer.')
-    elif run<=0:
-        raise ValueError('run should be a positive integer.')
-    
-    # Checking if z has correct type and values
-    if type(z) is np.ndarray:
-        if np.array(z.shape).shape[0] != 2:
-            raise Exception('z has wrong shape.')
-        elif z.shape[0] != x.shape[0]:
-            raise Exception('z should have the same length as x.')
-        elif True in np.isnan(z):
-            raise ValueError('There is some NaN in z.')
-        elif True in np.isinf(z):
-            raise ValueError('There is some infinity value in z.')
-    elif z != []:
-        raise TypeError('z should be numpy ndarray or [].')
-        
-    # Checking if the number of Dense layers is correct
-    if type(Dense_layers) is not int:
-        raise TypeError('Dense_layers should be a positive integer.')
-    if Dense_layers<0:
-        raise ValueError('Dense_layers sholud be a positive integer.')
-    
-    # Checking if the number of Dense neurons in each layer is correct
-    elif type(Dense_neurons) is list or type(Dense_neurons) is np.ndarray or type(GRU_neurons) is tuple:
-        for Dense_n in Dense_neurons:
-            if type(Dense_n) is not int:
-                raise TypeError('Every element in Dense_neurons should be a positive integer.')
-            elif Dense_layers>0 and Dense_n<=0:
-                raise ValueError('Every element in Dense_neurons should be a positive integer.')
-        if len(np.shape(Dense_neurons)) != 1:
-            raise Exception('Dense_neurons should be one dimension array or list.')
-        elif len(Dense_neurons) != Dense_layers:
-            raise Exception('Number of elements in Dense_neurons should be equal to value of Dense_layers.')
-    else:
-        raise TypeError('Dense_neurons should be list or numpy array.')
-    
-    # Checking the test data correctness
-    isxtest = False
-    if type(xtest) is np.ndarray:
-        if np.array(xtest.shape).shape[0] != 2:
-            raise Exception('xtest has wrong shape.')
-        if xtest.shape[1] !=2:
-            raise Exception('xtest has to many columns.')
-        elif True in np.isnan(xtest):
-            raise ValueError('There is some NaN in xtest.')
-        elif True in np.isinf(xtest):
-            raise ValueError('There is some infinity value in xtest.')
-        else:
-            isxtest = True
-    elif xtest==[]:
-        xtest=x
-    else:
-        raise TypeError('xtest should be numpy ndarray, or [].')  
-    
-    # Checking the z test data correctness
-    if type(ztest) is np.ndarray:
-        if np.array(ztest.shape).shape[0] != 2:
-            raise Exception('ztest has wrong shape.')
-        if ztest.shape[0] != xtest.shape[0]:
-            raise Exception('ztest should have the same length as xtest.')
-        elif True in np.isnan(ztest):
-            raise ValueError('There is some NaN in ztest.')
-        elif True in np.isinf(ztest):
-            raise ValueError('There is some infinity value in ztest.')
-    elif z!=[] and ztest==[] and isxtest==False:
-        ztest=z
-    elif z!=[] and ztest==[] and isxtest==True:
-        raise Exception('ztest should have the same length as xtest.')
-    elif ztest != [] :
-        raise TypeError('ztest should be numpy ndarray, or [].')  
-        
-    # Checking if add_Dropout has correct type
-    if type(add_Dropout) is not bool:
-        raise TypeError('add_Dropout should be boolean.')
-    # Checking if Dropout_rate has correct type and value
-    if type(Dropout_rate) is not float:
-        raise TypeError('Dropout_rate should be float.')
-    else:
-        if Dropout_rate<0.0 or Dropout_rate>=1.0:
-            raise ValueError('Dropout_rate shold be greater than 0 and less than 1.')
-            
-    # Checking if epochs_num has correct type and value
-    if type(epochs_num) is not int and type(epochs_num) is not list:
-        raise TypeError('epochs_num should be a positive integer or list of positibe integers.')
-    elif type(epochs_num) is int:
-        if epochs_num<=0:
-            raise ValueError('epochs_num should be a positive integer or list of positibe integers.')
-        else:
-            epochs_num=[epochs_num]
-        if type(learning_rate) is list:
-                raise TypeError('If epochs_num is a int, then learning_rate also should be int or float not list.')      
-    elif type(epochs_num) is list:
-        for e in epochs_num:
-            if type(e) is not int:
-                raise TypeError('epochs_num should be a positive integer or list of positibe integers (or both).')
-            elif e<=0:
-                raise ValueError('epochs_num should be a positive integer or list of positibe integers (or both).')
-        if type(learning_rate) is not list:
-                raise TypeError('If epochs_num is a list, then learning_rate also should be a list.')
-    
-    # Checking if learning_rate has correct type and value
-    if type(learning_rate) is not int and type(learning_rate) is not float and type(learning_rate) is not list:
-        raise TypeError('learning_rate should be a positive integer or float or list of positibe integers or floats (or both).')
-    elif type(learning_rate) is int or type(learning_rate) is float:
-        if learning_rate<=0:
-            raise ValueError('learning_rate should be a positive integer or float or list of positibe integers or floats (or both).')
-        else:
-            learning_rate=[learning_rate]
-        if type(learning_rate) is  list:
-            raise TypeError('If learning_rate is int or float, then epochs_num should be int not list.')    
-    elif type(learning_rate) is list:
-        for lr in learning_rate:
-            if type(lr) is not int and type(lr) is not float:
-                raise TypeError('learning_rate should be a positive integer or float or list of positibe integers or floats (or both).')
-            elif lr<=0:
-                raise ValueError('learning_rate should be a positive integer or float or list of positibe integers or floats (or both).')
-        if type(epochs_num) is not list:
-            raise TypeError('If learning_rate is a list, then epochs_num also should be a list.')
-    
-    # Checking if batch_size_num has correct type and value
-    if type(batch_size_num) is not int: # or not np.isnan(batch_size_num) :
-        raise TypeError('batch_size_num should be an integer or NaN.')
-    elif type(batch_size_num) is int:
-        if batch_size_num<=0:
-            raise ValueError('batch_size_num should be a positive integer.')
-    
-    # Checking if verbose has correct type
-    if type(verbose) is not bool:
-        raise TypeError('verbose should be boolean.')
-        
-    # Checking if plot has correct type
-    if type(plot) is not bool:
-        raise TypeError('plot should be boolean.')
-        
-    # Number of samples in each time series
-    length = x.shape[0]
-    testlength = xtest.shape[0]
-    results = dict()
-    
-    # Creating GRU neural network models and testing for casuality for every lag specified by maxlag
-    for lag in lags:
-        X = x[lag:,0] # signal, that will be forecasting
-        Xtest = xtest[lag:,0]
-        
-        # input data for model based only on X (and z if set)
-        if z!=[]:
-            xz= np.concatenate((z,x[:,0].reshape(x.shape[0],1)),axis=1)
-            dataX = np.zeros([x.shape[0]-lag,lag,xz.shape[1]]) # input matrix for training the model only with data from X time series
-            for i in range(length-lag):
-                dataX[i,:,:]=xz[i:i+lag,:]    # each row is lag number of values before the value in corresponding row in X    
-        else:
-            dataX = np.zeros([x.shape[0]-lag,lag]) # input matrix for training the model only with data from X time series
-            for i in range(length-lag):
-                dataX[i,:]=x[i:i+lag,0]    # each row is lag number of values before the value in corresponding row in X
-            dataX = dataX.reshape(dataX.shape[0],dataX.shape[1],1) # reshaping the data to meet the requirements of the model
-                
-        # input data for model based on X and Y (and z if set)
-        if z!=[]:
-            xz= np.concatenate((z,x),axis=1)
-        else:
-            xz=x
-        dataXY = np.zeros([xz.shape[0]-lag,lag,xz.shape[1]]) # input matrix for training the model with data from X and Y time series
-        for i in range(length-lag):
-            dataXY[i,:,:] = xz[i:i+lag,:] # in each row there is lag number of values of X and lag number of values of Y before the value in corresponding row in X
-        
-        # test data for model based only on X (and z if set)
-        if z!=[]:
-            xztest= np.concatenate((ztest,xtest[:,0].reshape(xtest.shape[0],1)),axis=1)
-            dataXtest = np.zeros([xztest.shape[0]-lag,lag,xztest.shape[1]]) # input matrix for training the model only with data from X time series
-            for i in range(testlength-lag):
-                dataXtest[i,:,:]=xztest[i:i+lag,:]    # each row is lag number of values before the value in corresponding row in X
-        else:
-            dataXtest = np.zeros([xtest.shape[0]-lag,lag]) # input matrix for testing the model only with data from X time series
-            for i in range(xtest.shape[0]-lag):
-                dataXtest[i,:]=xtest[i:i+lag,0]    # each row is lag number of values before the value in corresponding row in X
-            dataXtest = dataXtest.reshape(dataXtest.shape[0],dataXtest.shape[1],1) # reshaping the data to meet the requirements of the model
-        
-        # test testing data for model based on X and Y (and z if set)
-        if z!=[]:
-            xztest= np.concatenate((ztest,xtest),axis=1)
-        else:
-            xztest=xtest
-        dataXYtest = np.zeros([xztest.shape[0]-lag,lag,xztest.shape[1]]) # input matrix for training the model with data from X and Y time series
-        for i in range(testlength-lag):
-            dataXYtest[i,:,:] = xztest[i:i+lag,:] # in each row there is lag number of values of X and lag number of values of Y before the value in corresponding row in X
+    model = Model(inputs=input_layer, outputs=output)
 
-        
-        modelX = {}
-        modelXY = {}
-        RSSX = []
-        RSSXY = []
-        historyX = {}
-        historyXY = {}
-        for r in range(run):
-        
-            modelX[r] = Sequential() # creating Sequential model, which will use only data from X time series to forecast X.
-            historyX[r] = []
-            historyXY[r] = []
-            
-            if GRU_layers == 1: # If there is only one GRU layer, than return_sequences should be false
-                modelX[r].add(GRU(GRU_neurons[0],input_shape=(dataX.shape[1],dataX.shape[2]), activation='tanh', recurrent_activation='tanh', use_bias=True, return_sequences = False))
-            else: # For many GRU layers return_sequences should be True, to conncect layers with each other
-                modelX[r].add(GRU(GRU_neurons[0],input_shape=(dataX.shape[1],dataX.shape[2]), activation='tanh', recurrent_activation='tanh', use_bias=True, return_sequences = True))
-            if add_Dropout: # adding Dropout
-                modelX[r].add(Dropout(Dropout_rate))
-            
-            for grul in range(1,GRU_layers):  # adding next GRU layers
-                if grul == GRU_layers-1:
-                    modelX[r].add(GRU(GRU_neurons[grul],input_shape=(GRU_neurons[grul-1],1), activation='tanh', recurrent_activation='tanh', use_bias=True))
-                else:
-                    modelX[r].add(GRU(GRU_neurons[grul],input_shape=(GRU_neurons[grul-1],1), activation='tanh', recurrent_activation='tanh', use_bias=True))
-                if add_Dropout: # adding Dropout
-                    modelX[r].add(Dropout(Dropout_rate))
-            
-            for densel in range(Dense_layers): # adding Dense layers if asked
-                modelX[r].add(Dense(Dense_neurons[densel],activation = 'relu'))
-                if add_Dropout: # adding Dropout
-                    modelX[r].add(Dropout(Dropout_rate))
-                    
-            modelX[r].add(Dense(1,activation = 'linear')) # adding output layer
-
-            modelXY[r] = Sequential()# creating Sequential model, which will use data from X and Y time series to forecast X.
-            
-            if GRU_layers == 1: # If there is only one GRU layer, than return_sequences should be false
-                modelXY[r].add(GRU(GRU_neurons[0],input_shape=(dataXY.shape[1],dataXY.shape[2]), activation='tanh', recurrent_activation='tanh', use_bias=True, return_sequences = False))
-            else: # For many GRU layers return_sequences should be True, to conncect layers with each other
-                modelXY[r].add(GRU(GRU_neurons[0],input_shape=(dataXY.shape[1],dataXY.shape[2]), activation='tanh', recurrent_activation='tanh', use_bias=True, return_sequences = True))
-            if add_Dropout: # adding Dropout
-                modelXY[r].add(Dropout(Dropout_rate))
-            
-            for grul in range(1,GRU_layers):  # adding next GRU layers
-                if grul == GRU_layers-1:
-                    modelXY[r].add(GRU(GRU_neurons[grul],input_shape=(GRU_neurons[grul-1],1), activation='tanh', recurrent_activation='tanh', use_bias=True))
-                else:
-                    modelXY[r].add(GRU(GRU_neurons[grul],input_shape=(GRU_neurons[grul-1],1), activation='tanh', recurrent_activation='tanh', use_bias=True))
-                if add_Dropout: # adding Dropout
-                    modelXY[r].add(Dropout(Dropout_rate))
-            
-            for densel in range(Dense_layers): # adding Dense layers if asked
-                modelXY[r].add(Dense(Dense_neurons[densel],activation = 'relu'))
-                if add_Dropout: # adding Dropout
-                    modelXY[r].add(Dropout(Dropout_rate))
-                    
-            modelXY[r].add(Dense(1,activation = 'linear')) # adding output layer
+    return model
 
 
-            for i, e in enumerate(epochs_num):
-                opt = keras.optimizers.Adam(learning_rate=learning_rate[i])
-                modelX[r].compile(optimizer=opt,
-                            loss='mean_squared_error',
-                            metrics=['mse'])
-                
-                historyX[r].append(modelX[r].fit(dataX, X, epochs = e, batch_size = batch_size_num, verbose = verbose))
+def nonlincausalityGRU(
+    x,
+    maxlag,
+    GRU_layers,
+    GRU_neurons,
+    Dense_layers=0,
+    Dense_neurons=[],
+    x_test=[],
+    run=1,
+    z=[],
+    z_test=[],
+    add_Dropout=True,
+    Dropout_rate=0.1,
+    epochs_num=100,
+    learning_rate=0.01,
+    batch_size_num=32,
+    verbose=True,
+    plot=False,
+):
+    """
+    Parameters
+    ----------
+    x : numpy.array
+        2D Array with 2 columns containing X and Y signals respectively. 
+        Using this function it is tested if Y->X.
+        This data is used for training the models.
+    maxlag : list, tuple, array or int
+        Collection of lags, for which the causality analysis will be conducted. 
+        Lag is a number of past values used for predictions.
+        If int then all integers from 1 to maxlag are used as lag.
+    GRU_layers : int
+        Number of GRU layers
+    GRU_neurons : list
+        List with the numbers of GRU cells in each GRU layer
+    Dense_layers : int, optional
+        Number of Dense layers after GRU layers. The default is 0.
+    Dense_neurons : list, optional
+        List with the numbers of neurons in each fully-connecred layer. 
+        The default is []. 
+    x_test : numpy.array, optional
+        2D Array with 2 columns containing X and Y signals respectively. 
+        This data is used for testing the models. 
+        If it is [], then x is used for testing.
+        The default is [].
+    run : int, optional
+        The number of repetitions of the neural network training processes to obtain the network that obtains the lowest RSS value. 
+        The default is 1.
+    z : numpy.array, optional
+        2D array of the train dataset, each column is another exogenous signal for conditional causality testing.
+        The default is [].
+    z_test : numpy.array, optional
+        2D array of the test dataset, each column is another exogenous signal for conditional causality testing.
+        The default is [].
+    add_Dropout : bool, optional
+        Specifies whether dropout regularization should be applied.
+        The default is True.
+    Dropout_rate : float
+        Dropout rate - the number between 0 and 1.
+        The default is 0.1.
+    epochs_num : list or int, optional
+        Number of epochs of training the models.
+        If it is list then the consecutive elements is corresponding to the consecutive values of learning rates in learning_rate.        
+        The default is 100.
+    learning_rate : list or int, optional
+        Learning rates used in training process.
+        The default is 0.01.
+    batch_size_num : int, optional
+        Number specifies the batch size. The default is 32.
+    verbose : bool, optional
+        Specifies whether the learning process should be printed. The default is True.
+    plot : bool, optional
+        Specifies whether the predicted values along with original signals should be plotted.
+        The default is False.
 
-                modelXY[r].compile(optimizer=opt,
-                            loss='mean_squared_error',
-                            metrics=['mse'])
-            
-                historyXY[r].append(modelXY[r].fit(dataXY, X, epochs = e, batch_size = batch_size_num, verbose = verbose))
+    Returns
+    -------
+    results : dictionary
+        Results of the causality analysis. Keys of the dictionary are lags for which analysis was conducted.
+        The dictionary values are of the ResultsNonlincausality class.
 
-            XpredX = modelX[r].predict(dataXtest) # prediction of X based on past of X
-            XpredX = XpredX.reshape(XpredX.size)
-            errorX = Xtest-XpredX
-                    
-            XYpredX = modelXY[r].predict(dataXYtest)  # forecasting X based on the past of X and Y
-            XYpredX = XYpredX.reshape(XYpredX.size)
-            errorXY = Xtest-XYpredX
-                
-            RSSX.append(sum(errorX**2))
-            RSSXY.append(sum(errorXY**2))
-        
-        idx_bestX = RSSX.index(min(RSSX))
-        idx_bestXY = RSSXY.index(min(RSSXY))
-        
-        best_modelX = modelX[idx_bestX]
-        best_modelXY = modelXY[idx_bestXY]
-        
-        # Testing for statistically smaller forecast error for the model, which include X and Y
-        # Wilcoxon Signed Rank Test test
-        XpredX = best_modelX.predict(dataXtest)
-        XpredX = XpredX.reshape(XpredX.size)
-        XYpredX = best_modelXY.predict(dataXYtest)
-        XYpredX = XYpredX.reshape(XYpredX.size)
+    """
+    results = run_nonlincausality(
+        GRU_architecture,
+        x,
+        maxlag,
+        GRU_layers,
+        GRU_neurons,
+        Dense_layers,
+        Dense_neurons,
+        x_test,
+        run,
+        z,
+        z_test,
+        add_Dropout,
+        Dropout_rate,
+        epochs_num,
+        learning_rate,
+        batch_size_num,
+        verbose,
+        plot,
+        "GRU",
+    )
 
-        errorX = Xtest-XpredX
-        errorXY = Xtest-XYpredX
-
-        S, p_value = stats.wilcoxon(np.abs(errorX),np.abs(errorXY),alternative='greater')
-        
-        # Printing the tests results and plotting effects of forecasting
-        print("Statistics value =", S,"p-value =", p_value)
-        if plot:
-            XpredX = best_modelX.predict(dataXtest)
-            XYpredX = best_modelXY.predict(dataXYtest)
-            plt.figure(figsize=(10,7))
-            plt.plot(Xtest)
-            plt.plot(XpredX)
-            plt.plot(XYpredX)
-            plt.legend(['X','Pred. based on X','Pred. based on X and Y'])
-            plt.xlabel('Number of sample')
-            plt.ylabel('Predicted value')
-            plt.title('Lags:'+str(lag))
-            plt.show()
-        
-        test_results = {"Wilcoxon test": ([S, p_value],['Statistics value', 'p-value'])}
-        results[lag] = ([test_results, modelX, modelXY, historyX, historyXY,
-                         RSSX, RSSXY, idx_bestX, idx_bestXY, errorX, errorXY],
-                        ['test results','models based on X', 'models based on X and Y', 
-                         'history of fitting models based on X', 'history of fitting models based on X and Y', 
-                         'RSS of models based only on X', 'RSS of models based on X and Y',
-                         'index of the best model based on X', 'index of the best model based on X and Y',
-                         'errors from model based on X','errors from model based on X and Y'])
-        
     return results
-        
+
+
+#%% MLP
+def MLP_architecture(
+    Dense_layers, Dense_neurons, add_Dropout, Dropout_rate, data_shape
+):
+    """
+    Parameters
+    ----------
+    Dense_layers : int
+        Number of Dense layers after GRU layers.
+    Dense_neurons : list
+        List with the numbers of neurons in each fully-connecred layer.
+    add_Dropout : bool
+        Specifies whether dropout regularization should be applied.
+    Dropout_rate : float
+        Dropout rate - the number between 0 and 1.
+    data_shape : tuple
+        Shape of the training data.
+
+    Returns
+    -------
+    model : keras.engine.training.Model
+        Model with the specified architecture.
+
+    """
+    # data_shape[1] - lag, data_shape[2] - number of signals
+    input_layer = Input((data_shape[1], data_shape[2]))
+
+    layers_dense = Dense(Dense_neurons[0], activation="relu")(input_layer)
+    # Adding Dropout
+    if add_Dropout:
+        layers_dense = Dropout(Dropout_rate)(layers_dense)
+    # Adding Dense layers
+    for densel in range(1, Dense_layers):
+        layers_dense = Dense(Dense_neurons[densel], activation="relu")(layers_dense)
+        # Adding Dropout
+        if add_Dropout:
+            layers_dense = Dropout(Dropout_rate)(layers_dense)
+    layers_dense = Flatten()(layers_dense)
+    # Adding output layer
+    output = Dense(1, activation="linear")(layers_dense)
+
+    model = Model(inputs=input_layer, outputs=output)
+
+    return model
+
+
+def nonlincausalityMLP(
+    x,
+    maxlag,
+    Dense_layers,
+    Dense_neurons,
+    x_test=[],
+    run=1,
+    z=[],
+    z_test=[],
+    add_Dropout=True,
+    Dropout_rate=0.1,
+    epochs_num=100,
+    learning_rate=0.01,
+    batch_size_num=32,
+    verbose=True,
+    plot=False,
+):
+    """
+    Parameters
+    ----------
+    x : numpy.array
+        2D Array with 2 columns containing X and Y signals respectively. 
+        Using this function it is tested if Y->X.
+        This data is used for training the models.
+    maxlag : list, tuple, array or int
+        Collection of lags, for which the causality analysis will be conducted. 
+        Lag is a number of past values used for predictions.
+        If int then all integers from 1 to maxlag are used as lag.
+    Dense_layers : int
+        Number of Dense layers.
+    Dense_neurons : list
+        List with the numbers of neurons in each fully-connecred layer. 
+    run : int, optional
+        The number of repetitions of the neural network training processes to obtain the network that obtains the lowest RSS value. 
+        The default is 1.
+    x_test : numpy.array, optional
+        2D Array with 2 columns containing X and Y signals respectively. 
+        This data is used for testing the models. 
+        If it is [], then x is used for testing.
+        The default is [].
+    z : numpy.array, optional
+        2D array of the train dataset, each column is another exogenous signal for conditional causality testing.
+        The default is [].
+    z_test : numpy.array, optional
+        2D array of the test dataset, each column is another exogenous signal for conditional causality testing.
+        The default is [].
+    add_Dropout : bool, optional
+        Specifies whether dropout regularization should be applied.
+        The default is True.
+    Dropout_rate : float
+        Dropout rate - the number between 0 and 1.
+        The default is 0.1.
+    epochs_num : list or int, optional
+        Number of epochs of training the models.
+        If it is list then the consecutive elements is corresponding to the consecutive values of learning rates in learning_rate.        
+        The default is 100.
+    learning_rate : list or int, optional
+        Learning rates used in training process.
+        The default is 0.01.
+    batch_size_num : int, optional
+        Number specifies the batch size. The default is 32.
+    verbose : bool, optional
+        Specifies whether the learning process should be printed. The default is True.
+    plot : bool, optional
+        Specifies whether the predicted values along with original signals should be plotted.
+        The default is False.
+
+    Returns
+    -------
+    results : dictionary
+        Results of the causality analysis. Keys of the dictionary are lags for which analysis was conducted.
+        The dictionary values are of the ResultsNonlincausality class.
+
+    """
+    results = run_nonlincausality(
+        MLP_architecture,
+        x,
+        maxlag,
+        None,
+        None,
+        Dense_layers,
+        Dense_neurons,
+        x_test,
+        run,
+        z,
+        z_test,
+        add_Dropout,
+        Dropout_rate,
+        epochs_num,
+        learning_rate,
+        batch_size_num,
+        verbose,
+        plot,
+        "MLP",
+    )
+
+    return results
+
+
 #%% NN
-def nonlincausalityNN(x, maxlag, NN_config, NN_neurons, run=1, xtest=[], z=[], ztest=[], epochs_num=100, learning_rate=0.01, batch_size_num=32, verbose = True, plot = False):
-    '''
-    This function is implementation of modified Granger causality test. Granger causality is using linear autoregression for testing causality.
-    In this function forecasting is made using Neural Network. 
-    
+def check_if_seq(NN_config):
+    """
     Parameters
     ----------
-    x - numpy ndarray, where each column corresponds to one time series. 
-    
-    maxlag - int, list, tuple or numpy ndarray. If maxlag is int, then test for causality is made for lags from 1 to maxlag.
-    If maxlag is list, tuple or numpy ndarray, then test for causality is made for every number of lags in maxlag.
-    
-    NN_config - list, tuple or numpy ndarray. Specified subsequent layers of the neural network. List should contain only 'd', 'l', 'g' or 'dr':
-        'd' - Dense layer
-        'l' - LSTM layer
-        'g' - GRU layer
-        'dr' - Dropout layer
-    
-    NN_neurons - list, tuple or numpy ndarray, where the number of elements should be equal to the number of layers in NN_config. Each value corresponds to the number of neurons in layers for Danse, LSTM and GRU layer and the rate for Dropout layer.
-        E.g. if NN_config = ['l','dr','d'] and NN_neurons = [100, 0.1, 30], than first layer is LSTM layer with 100 neurons, than is Dropout layer with rate 0.1 and after it is Dense layer with 30 neurons.
-        Always last layer is Dense layer with one neuron and linear activation function. 
-    
-    run - int, determines how many times a given neural network architecture will be trained to select the model that has found the best minimum of the cost function
+    NN_config : list
+        Specifies the architecture of neural network.
 
-    xtest - numpy ndarray, where each column corresponds to one time series, as in the variable x. This data will be used for testing hypothesis. 
-    
-    z - numpy ndarray (or [] if not applied), where each column corresponds to one time series. This variable is for testing conditional causality. 
-    In this approach, the first model is forecasting the present value of X based on past values of X and z, while the second model is forecasting the same value based on the past of X, Y and z.
-    
-    ztest - numpy ndarray (or [] if not applied), where each column corresponds to one time series, as in the variable z. This data will be used for testing hypothesis. 
-
-    epochs_num -  int or list, number of epochs used for fitting the model. If list, then the length should be equal to number of different learning rates used
-    
-    learning_rate - float or list, the applied learning rate for the training process. If list, then the length should be equal to the lenth of epochs_num list.
-     
-    batch_size_num -  int, number of batch size for fitting the model.
-    
-    verbose - boolean, if True, then results are shown after each lag. 
-    
-    plot - boolean, if True plots of original and predicted values are made after each lag.
-    
     Returns
     -------
-    results - dictionary, where the number of used lags is keys. Each key stores a list, which contains test results, models for prediction of X fitted only on X time series, 
-    models for prediction of X fitted on X and Y time series, history of fitting the first model, history of fitting the second model, RSS of models based only on X, RSS of models based on X and Y,
-    index of the best model based on X, index of the best model based on X and Y, errors from the best model based on X, errors from the best model based on X and Y
-    
-    ------
-    Example 1.
-    NN_config = ['l','dr','d'], NN_neurons = [100, 0.1, 30]
-    Used model:
-        LSTM layer(100 neurons) -> Dropout layer (rate = 0.1) -> Dense layer(30 neurons) -> Dense layer(1 neuron)
-        
-    Example 2.
-    NN_config = ['g','d','dr','l'], NN_neurons = [50, 40, 0.2, 20]
-    Used model:
-        GRU layer(50 neurons) -> Dense layer(40 neurons) -> Dropout layer(rate =0.2) -> LSTM layer(20 neurons) -> Dense layer(1 neuron)
-    '''
-    
-    # Checking the data correctness
-    if type(x) is np.ndarray:
-        if np.array(x.shape).shape[0] !=2:
-            raise Exception('x has wrong shape.')
-        elif x.shape[1] !=2:
-            raise Exception('x should have 2 columns.')
-        elif True in np.isnan(x):
-            raise ValueError('There is some NaN in x.')
-        elif True in np.isinf(x):
-            raise ValueError('There is some infinity value in x.')
+    return_seq : bool
+        Specifies if there are some GRU or LSTM layers in the NN_config (or its part).
+
+    """
+    if "g" in NN_config or "l" in NN_config:
+        return_seq = True
     else:
-        raise TypeError('x should be numpy ndarray.')
-    
-    # Checking if maxlag has correct type and values
-    if type(maxlag) is list or type(maxlag) is np.ndarray or type(maxlag) is tuple:
-        lags = maxlag
-        for lag in lags:
-            if type(lag) is not int:
-                raise ValueError('Every element in maxlag should be a positive integer.')
-            elif lag<=0:
-                raise ValueError('Every element in maxlag should be a positive integer.')
-    elif type(maxlag) is int:
-        if maxlag>0:
-            lags = range(1,maxlag+1)
+        return_seq = False
+    return return_seq
+
+
+def NN_architecture(NN_config, NN_neurons, data_shape):
+    """
+    Parameters
+    ----------
+    NN_config : list
+        List, that specifies the architecture of the neural network.
+    NN_neurons : list
+        List, that specifies the number of neurons/cells or dropout rate in each layer.
+    data_shape : tuple
+        Shape of the training data.
+
+    Returns
+    -------
+    model : keras.engine.training.Model
+        Model with the specified architecture.
+
+    """
+    # data_shape[1] - lag, data_shape[2] - number of signals
+    input_layer = Input((data_shape[1], data_shape[2]))
+
+    return_seq = check_if_seq(NN_config[1:])
+
+    # Adding the first layer
+    if NN_config[0] == "d":  # Adding Dense layer
+        # If one of the next layers is LSTM or GRU
+        if return_seq:
+            layers_nn = TimeDistributed(Dense(NN_neurons[0], activation="relu"))(
+                input_layer
+            )
         else:
-            raise ValueError('maxlag should be grater than 0.')
-    else:
-        raise TypeError('maxlag should be int, list, tuple or numpy ndarray.')
+            layers_nn = Dense(NN_neurons[0], activation="relu")(input_layer)
+    elif NN_config[0] == "g":  # Adding GRU layer
+        layers_nn = GRU(
+            NN_neurons[0],
+            activation="tanh",
+            recurrent_activation="tanh",
+            use_bias=True,
+            return_sequences=return_seq,
+        )(input_layer)
+    elif NN_config[0] == "l":  # Adding LSTM layer
+        layers_nn = LSTM(
+            NN_neurons[0],
+            activation="tanh",
+            recurrent_activation="tanh",
+            use_bias=True,
+            return_sequences=return_seq,
+        )(input_layer)
         
-    # Checking if NN_config has correct type and values
-    if type(NN_config) is not np.ndarray and type(NN_config) is not list and type(NN_config) is not tuple:
-        raise TypeError('NN_config should be list, tuple or numpy array.')
-    elif len(NN_config)==0:
-        raise ValueError('NN_config can not be empty.')
-    else:
-        for n in NN_config:
-            if n == 'd' or n == 'l' or n =='g' or n == 'dr':
-                continue
+    # Adding rest layers
+    for idx, n in enumerate(NN_config[1:]):
+        return_seq = check_if_seq(NN_config[idx + 2 :])
+
+        if n == "d":  # adding Dense layer
+            # If one of the next layers is LSTM or GRU
+            if return_seq:
+                layers_nn = TimeDistributed(
+                    Dense(NN_neurons[idx + 1], activation="relu")
+                )(layers_nn)
             else:
-                raise ValueError("Elements in NN_config should be equal to 'd' for Dense, 'l' for LSTM, 'g' for GRU or 'dr' for Dropout.")
-    
-    # Checking if NN_neurons has correct type and values
-    if type(NN_neurons) is not np.ndarray and type(NN_neurons) is not list and type(NN_neurons) is not tuple:
-        raise TypeError('NN_neurons should be list, tuple or numpy array.')
-    elif len(NN_neurons)==0:
-        raise Exception('NN_neurons can not be empty.')
-    elif len(NN_neurons) != len(NN_config):
-        raise Exception('NN_neurons should have the same number of elements as NN_config.')
-    else:
-        for i, n in enumerate(NN_neurons):
-            if type(n) is not int and NN_config[i] !='dr' or NN_config[i] =='dr' and type(n) is not float:
-                raise TypeError('Every element in NN_neurons should be a positive integer or a float between 0 and 1 for Dropout layer.')
-            elif NN_config[i] =='dr' and n>=1.0:
-                raise ValueError('Value for Dropout layer should be float between 0 and 1.')
-            elif n<=0:
-                raise ValueError('Every element in NN_neurons should be a positive integer or a float between 0 and 1 for Dropout layer.')
-        
-    # Checking if run has correct type and value
-    if type(run) is not int:
-        raise TypeError('run should be an integer.')
-    elif run<=0:
-        raise ValueError('run should be a positive integer.')
-        
-    # Checking the test data correctness
-    isxtest = False
-    if type(xtest) is np.ndarray:
-        if np.array(xtest.shape).shape[0] !=2:
-            raise Exception('xtest has wrong shape.')
-        elif xtest.shape[1] !=2:
-            raise Exception('xtest has to many columns.')
-        elif True in np.isnan(xtest):
-            raise ValueError('There is some NaN in xtest.')
-        elif True in np.isinf(xtest):
-            raise ValueError('There is some infinity value in xtest.')
-        else:
-            isxtest = True
-    elif xtest==[]:
-        xtest=x
-    else:
-        raise TypeError('xtest should be numpy ndarray, or [].')  
-       
-    # Checking if z has correct type and values
-    if type(z) is np.ndarray:
-        if np.array(z.shape).shape[0] != 2:
-            raise Exception('z has wrong shape.')
-        elif z.shape[0] != x.shape[0]:
-            raise Exception('z should have the same length as x.')
-        elif True in np.isnan(z):
-            raise ValueError('There is some NaN in z.')
-        elif True in np.isinf(z):
-            raise ValueError('There is some infinity value in z.')
-    elif z != []:
-        raise TypeError('z should be numpy ndarray or [].')
-        
-    # Checking the z test data correctness
-    if type(ztest) is np.ndarray:
-        if np.array(ztest.shape).shape[0] != 2:
-            raise Exception('ztest has wrong shape.')
-        if ztest.shape[0] != xtest.shape[0]:
-            raise Exception('ztest should have the same length as xtest.')
-        elif True in np.isnan(ztest):
-            raise ValueError('There is some NaN in ztest.')
-        elif True in np.isinf(ztest):
-            raise ValueError('There is some infinity value in ztest.')
-    elif z!=[] and ztest==[] and isxtest==False:
-        ztest=z
-    elif z!=[] and ztest==[] and isxtest==True:
-        raise Exception('ztest should have the same length as xtest.')
-    elif ztest != []:
-        raise TypeError('ztest should be numpy ndarray, or [].')  
-        
-    # Checking if epochs_num has correct type and value
-    if type(epochs_num) is not int and type(epochs_num) is not list:
-        raise TypeError('epochs_num should be a positive integer or list of positibe integers.')
-    elif type(epochs_num) is int:
-        if epochs_num<=0:
-            raise ValueError('epochs_num should be a positive integer or list of positibe integers.')
-        else:
-            epochs_num=[epochs_num]
-        if type(learning_rate) is list:
-                raise TypeError('If epochs_num is a int, then learning_rate also should be int or float not list.')      
-    elif type(epochs_num) is list:
-        for e in epochs_num:
-            if type(e) is not int:
-                raise TypeError('epochs_num should be a positive integer or list of positibe integers (or both).')
-            elif e<=0:
-                raise ValueError('epochs_num should be a positive integer or list of positibe integers (or both).')
-        if type(learning_rate) is not list:
-                raise TypeError('If epochs_num is a list, then learning_rate also should be a list.')
-    
-    # Checking if learning_rate has correct type and value
-    if type(learning_rate) is not int and type(learning_rate) is not float and type(learning_rate) is not list:
-        raise TypeError('learning_rate should be a positive integer or float or list of positibe integers or floats (or both).')
-    elif type(learning_rate) is int or type(learning_rate) is float:
-        if learning_rate<=0:
-            raise ValueError('learning_rate should be a positive integer or float or list of positibe integers or floats (or both).')
-        else:
-            learning_rate=[learning_rate]
-    elif type(learning_rate) is list:
-        for lr in learning_rate:
-            if type(lr) is not int and type(lr) is not float:
-                raise TypeError('learning_rate should be a positive integer or float or list of positibe integers or floats (or both).')
-            elif lr<=0:
-                raise ValueError('learning_rate should be a positive integer or float or list of positibe integers or floats (or both).')
-        if type(epochs_num) is not list:
-            raise TypeError('If learning_rate is a list, then epochs_num also should be a list.')
-    
-    # Checking if batch_size_num has correct type and value
-    if type(batch_size_num) is not int and not np.isnan(batch_size_num) :
-        raise TypeError('batch_size_num should be a positive integer or NaN.')
-    elif type(batch_size_num) is int:
-        if batch_size_num<=0:
-            raise ValueError('batch_size_num should be a positive integer.')
+                layers_nn = Dense(NN_neurons[idx + 1], activation="relu")(layers_nn)
+        elif n == "g":  # Adding GRU layer
+            layers_nn = GRU(
+                NN_neurons[idx + 1],
+                activation="tanh",
+                recurrent_activation="tanh",
+                use_bias=True,
+                return_sequences=return_seq,
+            )(layers_nn)
+        elif n == "l":  # Adding LSTM layer
+            layers_nn = LSTM(
+                NN_neurons[idx + 1],
+                activation="tanh",
+                recurrent_activation="tanh",
+                use_bias=True,
+                return_sequences=return_seq,
+            )(layers_nn)
+        elif n == "dr":  # Adding dropout
+            layers_nn = Dropout(NN_neurons[idx + 1])(layers_nn)
             
-    # Checking if verbose has correct type
-    if type(verbose) is not bool:
-        raise TypeError('verbose should be boolean.')
-        
-    # Checking if plot has correct type
-    if type(plot) is not bool:
-        raise TypeError('plot should be boolean.')
-        
-    # Number of samples in each time series
-    length = x.shape[0]
-    testlength = xtest.shape[0]
-    
-    results = dict()
-    
-    # Creating neural network models and testing for casuality for every lag specified by maxlag
-    for lag in lags:
-        X = x[lag:,0] # signal, that will be forecasting
-        Xtest = xtest[lag:,0]
-        
-        # input data for model based only on X (and z if set)
-        if z!=[]:
-            xz= np.concatenate((z,x[:,0].reshape(x.shape[0],1)),axis=1)
-            dataX = np.zeros([x.shape[0]-lag,lag,xz.shape[1]]) # input matrix for training the model only with data from X time series
-            for i in range(length-lag):
-                dataX[i,:,:]=xz[i:i+lag,:]    # each row is lag number of values before the value in corresponding row in X    
-        else:
-            dataX = np.zeros([x.shape[0]-lag,lag]) # input matrix for training the model only with data from X time series
-            for i in range(length-lag):
-                dataX[i,:]=x[i:i+lag,0]    # each row is lag number of values before the value in corresponding row in X
-            dataX = dataX.reshape(dataX.shape[0],dataX.shape[1],1) # reshaping the data to meet the requirements of the model
-                
-        # input data for model based on X and Y (and z if set)
-        if z!=[]:
-            xz= np.concatenate((z,x),axis=1)
-        else:
-            xz=x
-        dataXY = np.zeros([xz.shape[0]-lag,lag,xz.shape[1]]) # input matrix for training the model with data from X and Y time series
-        for i in range(length-lag):
-            dataXY[i,:,:] = xz[i:i+lag,:] # in each row there is lag number of values of X and lag number of values of Y before the value in corresponding row in X
-        
-        # test data for model based only on X (and z if set)
-        if z!=[]:
-            xztest= np.concatenate((ztest,xtest[:,0].reshape(xtest.shape[0],1)),axis=1)
-            dataXtest = np.zeros([xztest.shape[0]-lag,lag,xztest.shape[1]]) # input matrix for training the model only with data from X time series
-            for i in range(testlength-lag):
-                dataXtest[i,:,:]=xztest[i:i+lag,:]    # each row is lag number of values before the value in corresponding row in X
-        else:
-            dataXtest = np.zeros([xtest.shape[0]-lag,lag]) # input matrix for testing the model only with data from X time series
-            for i in range(xtest.shape[0]-lag):
-                dataXtest[i,:]=xtest[i:i+lag,0]    # each row is lag number of values before the value in corresponding row in X
-            dataXtest = dataXtest.reshape(dataXtest.shape[0],dataXtest.shape[1],1) # reshaping the data to meet the requirements of the model
-          
-        # test data for model based on X and Y (and z if set)
-        if z!=[]:
-            xztest= np.concatenate((ztest,xtest),axis=1)
-        else:
-            xztest=xtest
-        dataXYtest = np.zeros([xztest.shape[0]-lag,lag,xztest.shape[1]]) # input matrix for training the model with data from X and Y time series
-        for i in range(testlength-lag):
-            dataXYtest[i,:,:] = xztest[i:i+lag,:] # in each row there is lag number of values of X and lag number of values of Y before the value in corresponding row in X
+    # If there is no LSTM or GRU layer
+    if not "g" in NN_config and not "l" in NN_config:
+        layers_nn = Flatten()(layers_nn)
+    # Adding output layer
+    output = Dense(1, activation="linear")(layers_nn)
 
-        modelX = {}
-        modelXY = {}
-        RSSX = []
-        RSSXY = []
-        historyX = {}
-        historyXY = {}
-        for r in range(run):
-        
-            modelX[r] = Sequential() # Creating Sequential model, which will use only data from X time series to forecast X.
-            modelXY[r] = Sequential() # Creating Sequential model, which will use data from X and Y time series to forecast X.
-            historyX[r] = []
-            historyXY[r] = []
-            in_shape = dataX.shape[1]
-            for i, n in enumerate(NN_config):
-                if n == 'd': # adding Dense layer
-                    if i+1 == len(NN_config): # if it is the last layer
-                        modelX[r].add(Dense(NN_neurons[i], activation = 'relu'))
-                        modelXY[r].add(Dense(NN_neurons[i], activation = 'relu'))
-                    elif 'l' in NN_config[i+1:] or 'g' in NN_config[i+1:] and i == 0: # if one of the next layers is LSTM or GRU and it is the first layer
-                        modelX[r].add(TimeDistributed(Dense(NN_neurons[i],activation = 'relu'), input_shape = [dataX.shape[1],dataX.shape[2]]))
-                        modelXY[r].add(TimeDistributed(Dense(NN_neurons[i],activation = 'relu'), input_shape = [dataXY.shape[1],dataXY.shape[2]]))
-                        in_shape = NN_neurons[i] # input shape for the next layer
-                    elif 'l' in NN_config[i+1:] or 'g' in NN_config[i+1:]: # if one of the next layers is LSTM or GRU, but it is not the first layer
-                        modelX[r].add(TimeDistributed(Dense(NN_neurons[i],activation = 'relu')))
-                        modelXY[r].add(TimeDistributed(Dense(NN_neurons[i],activation = 'relu')))
-                        in_shape = NN_neurons[i] # input shape for the next layer
-                    elif i==0:
-                        modelX[r].add(Dense(NN_neurons[i], input_shape = [dataX.shape[1], dataX.shape[2]], activation = 'relu')) # TODO changing activation function
-                        modelXY[r].add(Dense(NN_neurons[i], input_shape = [dataXY.shape[1], dataXY.shape[2]], activation = 'relu')) # TODO changing activation function
-                        in_shape = NN_neurons[i] # input shape for the next layer
-                    else:
-                        modelX[r].add(Dense(NN_neurons[i], activation = 'relu')) # TODO changing activation function
-                        modelXY[r].add(Dense(NN_neurons[i], activation = 'relu')) # TODO changing activation function
-                        in_shape = NN_neurons[i] # input shape for the next layer
-                elif n == 'l': # adding LSTM layer
-                    if i+1 == len(NN_config)and i!=0: # if it is the last layer
-                        modelX[r].add(LSTM(NN_neurons[i],input_shape=(in_shape,1), activation='tanh', recurrent_activation='tanh', use_bias=True, return_sequences = False))
-                        modelXY[r].add(LSTM(NN_neurons[i],input_shape=(in_shape,1), activation='tanh', recurrent_activation='tanh', use_bias=True, return_sequences = False))
-                    elif i+1 == len(NN_config)and i==0: # if it is the only layer
-                        modelX[r].add(LSTM(NN_neurons[i],input_shape=(in_shape,dataX.shape[2]), activation='tanh', recurrent_activation='tanh', use_bias=True, return_sequences = False))
-                        modelXY[r].add(LSTM(NN_neurons[i],input_shape=(in_shape,dataXY.shape[2]), activation='tanh', recurrent_activation='tanh', use_bias=True, return_sequences = False))
-                    elif 'l' in NN_config[i+1:] or 'g' in NN_config[i+1:] and i == 0: # if one of the next layers is LSTM or GRU and it is the first layer
-                        modelX[r].add(LSTM(NN_neurons[i],input_shape=(dataX.shape[1],dataX.shape[2]), activation='tanh', recurrent_activation='tanh', use_bias=True, return_sequences = True))
-                        modelXY[r].add(LSTM(NN_neurons[i],input_shape=(dataXY.shape[1],dataXY.shape[2]), activation='tanh', recurrent_activation='tanh', use_bias=True, return_sequences = True))
-                        in_shape = NN_neurons[i] # input shape for the next layer
-                    elif 'l' in NN_config[i+1:] or 'g' in NN_config[i+1:]: # if one of the next layers is LSTM or GRU, but it is not the first layer
-                        modelX[r].add(LSTM(NN_neurons[i],input_shape=(in_shape,1), activation='tanh', recurrent_activation='tanh', use_bias=True, return_sequences = True))
-                        modelXY[r].add(LSTM(NN_neurons[i],input_shape=(in_shape,1), activation='tanh', recurrent_activation='tanh', use_bias=True, return_sequences = True))
-                        in_shape = NN_neurons[i] # input shape for the next layer
-                    elif 'l' not in NN_config[i+1:] or 'g' not in NN_config[i+1:] and i == 0: # if none of the next layers is LSTM or GRU and it is the first layer
-                        modelX[r].add(LSTM(NN_neurons[i],input_shape=(dataX.shape[1],dataX.shape[2]), activation='tanh', recurrent_activation='tanh', use_bias=True, return_sequences = False))
-                        modelXY[r].add(LSTM(NN_neurons[i],input_shape=(dataXY.shape[1],dataXY.shape[2]), activation='tanh', recurrent_activation='tanh', use_bias=True, return_sequences = False))
-                        in_shape = NN_neurons[i] # input shape for the next layer
-                    else:
-                        modelX[r].add(LSTM(NN_neurons[i],input_shape=(in_shape,1), activation='tanh', recurrent_activation='tanh', use_bias=True, return_sequences = False))
-                        modelXY[r].add(LSTM(NN_neurons[i],input_shape=(in_shape,1), activation='tanh', recurrent_activation='tanh', use_bias=True, return_sequences = False))
-                        in_shape = NN_neurons[i] # input shape for the next layer
-                elif n == 'g': # adding GRU layer
-                    if i+1 == len(NN_config) and i != 0: # if it is the last layer
-                        modelX[r].add(GRU(NN_neurons[i],input_shape=(in_shape,1), activation='tanh', recurrent_activation='tanh', use_bias=True, return_sequences = False))
-                        modelXY[r].add(GRU(NN_neurons[i],input_shape=(in_shape,1), activation='tanh', recurrent_activation='tanh', use_bias=True, return_sequences = False))
-                    if i+1 == len(NN_config) and i == 0: # if it is the only layer
-                        modelX[r].add(GRU(NN_neurons[i],input_shape=(in_shape,dataX.shape[2]), activation='tanh', recurrent_activation='tanh', use_bias=True, return_sequences = False))
-                        modelXY[r].add(GRU(NN_neurons[i],input_shape=(in_shape,dataXY.shape[2]), activation='tanh', recurrent_activation='tanh', use_bias=True, return_sequences = False))
-                    elif 'l' in NN_config[i+1:] or 'g' in NN_config[i+1:] and i == 0: # if one of the next layers is LSTM or GRU and it is the first layer
-                        modelX[r].add(GRU(NN_neurons[i],input_shape=(dataX.shape[1],dataX.shape[2]), activation='tanh', recurrent_activation='tanh', use_bias=True, return_sequences = True))
-                        modelXY[r].add(GRU(NN_neurons[i],input_shape=(dataXY.shape[1],dataXY.shape[2]), activation='tanh', recurrent_activation='tanh', use_bias=True, return_sequences = True))
-                        in_shape = NN_neurons[i] # input shape for the next layer
-                    elif 'l' in NN_config[i+1:] or 'g' in NN_config[i+1:]: # if one of the next layers is LSTM or GRU, but it is not the first layer
-                        modelX[r].add(GRU(NN_neurons[i],input_shape=(in_shape,1), activation='tanh', recurrent_activation='tanh', use_bias=True, return_sequences = True))
-                        modelXY[r].add(GRU(NN_neurons[i],input_shape=(in_shape,1), activation='tanh', recurrent_activation='tanh', use_bias=True, return_sequences = True))
-                        in_shape = NN_neurons[i] # input shape for the next layer
-                    elif 'l' not in NN_config[i+1:] or 'g' not in NN_config[i+1:] and i == 0: # if none of the next layers is LSTM or GRU and it is the first layer
-                        modelX[r].add(GRU(NN_neurons[i],input_shape=(dataX.shape[1],dataX.shape[2]), activation='tanh', recurrent_activation='tanh', use_bias=True, return_sequences = False))
-                        modelXY[r].add(GRU(NN_neurons[i],input_shape=(dataXY.shape[1],dataXY.shape[2]), activation='tanh', recurrent_activation='tanh', use_bias=True, return_sequences = False))
-                        in_shape = NN_neurons[i] # input shape for the next layer
-                    else:
-                        modelX[r].add(GRU(NN_neurons[i],input_shape=(in_shape,1), activation='tanh', recurrent_activation='tanh', use_bias=True, return_sequences = False))
-                        modelXY[r].add(GRU(NN_neurons[i],input_shape=(in_shape,1), activation='tanh', recurrent_activation='tanh', use_bias=True, return_sequences = False))
-                        in_shape = NN_neurons[i] # input shape for the next layer
-                elif n == 'dr':
-                    modelX[r].add(Dropout(NN_neurons[i]))
-                    modelXY[r].add(Dropout(NN_neurons[i]))
-            
-            if not('l' in NN_config or 'g' in NN_config):
-                modelX[r].add(Flatten())
-            modelX[r].add(Dense(1,activation = 'linear')) # adding output layer
-                        
-            if not('l' in NN_config or 'g' in NN_config):
-                modelXY[r].add(Flatten())
-            modelXY[r].add(Dense(1,activation = 'linear')) # adding output layer
-            
-            for i, e in enumerate(epochs_num):
-                opt = keras.optimizers.Adam(learning_rate=learning_rate[i])
-                modelX[r].compile(optimizer=opt,
-                            loss='mean_squared_error',
-                            metrics=['mse'])
-                historyX[r].append(modelX[r].fit(dataX, X, epochs = e, batch_size = batch_size_num, verbose = verbose))
+    model = Model(inputs=input_layer, outputs=output)
 
-                modelXY[r].compile(optimizer=opt,
-                            loss='mean_squared_error',
-                            metrics=['mse'])
-            
-                historyXY[r].append(modelXY[r].fit(dataXY, X, epochs = e, batch_size = batch_size_num, verbose = verbose))
-                
-            XpredX = modelX[r].predict(dataXtest) # prediction of X based on past of X
-            XpredX = XpredX.reshape(XpredX.size)
-            errorX = Xtest-XpredX
-            
-            XYpredX = modelXY[r].predict(dataXYtest)  # forecasting X based on the past of X and Y
-            XYpredX = XYpredX.reshape(XYpredX.size)
-            errorXY = Xtest-XYpredX
-            
-            RSSX.append(sum(errorX**2))
-            RSSXY.append(sum(errorXY**2))
-            
-        idx_bestX = RSSX.index(min(RSSX))
-        idx_bestXY = RSSXY.index(min(RSSXY))
-        
-        best_modelX = modelX[idx_bestX]
-        best_modelXY = modelXY[idx_bestXY]
-        
-        # Testing for statistically smaller forecast error for the model, which include X and Y      
-        # Wilcoxon Signed Rank Test test
-        XpredX = best_modelX.predict(dataXtest)
-        XpredX = XpredX.reshape(XpredX.size)
-        XYpredX = best_modelXY.predict(dataXYtest)
-        XYpredX = XYpredX.reshape(XYpredX.size)
+    return model
 
-        errorX = Xtest-XpredX
-        errorXY = Xtest-XYpredX
 
-        S, p_value = stats.wilcoxon(np.abs(errorX),np.abs(errorXY),alternative='greater')
-        
-        # Printing the tests results and plotting effects of forecasting
-        print('lag=%d' %lag)
-        print("Statistics value =", S,"p-value =", p_value)
-        if plot:
-            plt.figure(figsize=(10,7))
-            plt.plot(Xtest)
-            plt.plot(XpredX)
-            plt.plot(XYpredX)
-            plt.legend(['X','Pred. based on X','Pred. based on X and Y'])
-            plt.xlabel('Number of sample')
-            plt.ylabel('Predicted value')
-            plt.title('Lags:'+str(lag))
-            plt.show()
-        
-        test_results = {"Wilcoxon test": ([S, p_value],['Statistics value', 'p-value'])}
-        results[lag] = ([test_results, modelX, modelXY, historyX, historyXY, 
-                         RSSX, RSSXY, idx_bestX, idx_bestXY, errorX, errorXY],
-                        ['test results','models based on X', 'models based on X and Y', 
-                         'history of fitting models based on X', 'history of fitting models based on X and Y', 
-                         'RSS of models based only on X', 'RSS of models based on X and Y',
-                         'index of the best model based on X', 'index of the best model based on X and Y',
-                         'errors from model based on X','errors from model based on X and Y'])
-    return results
-        
-#%% ARIMAX 
-def nonlincausalityARIMAX(x, maxlag, d, xtest=[], z=[], ztest=[],plot = False):
-    '''
-    This function is implementation of modified Granger causality test. Granger causality is using linear autoregression for testing causality.
-    In this function forecasting is made using ARIMAX model. 
-    
+def nonlincausalityNN(
+    x,
+    maxlag,
+    NN_config,
+    NN_neurons,
+    x_test=[],
+    run=1,
+    z=[],
+    z_test=[],
+    epochs_num=100,
+    learning_rate=0.01,
+    batch_size_num=32,
+    verbose=True,
+    plot=False,
+):
+    """
     Parameters
     ----------
-    x - numpy ndarray, where each column corresponds to one time series. 
-    
-    maxlag - int, list, tuple or numpy ndarray. If maxlag is int, then test for causality is made for lags from 1 to maxlag.
-    If maxlag is list, tuple or numpy ndarray, then test for causality is made for every number of lags in maxlag.
-                
-    z - numpy ndarray (or [] if not applied), where each column corresponds to one time series. This variable is for testing conditional causality. 
-    In this approach, the first model is forecasting the present value of X based on past values of X and z, while the second model is forecasting the same value based on the past of X, Y and z.
-    
-    verbose - boolean, if True, then results are shown after each lag. 
-    
-    plot - boolean, if True plots of original and predicted values are made after each lag.
-    
+    x : numpy.array
+        2D Array with 2 columns containing X and Y signals respectively. 
+        Using this function it is tested if Y->X.
+        This data is used for training the models.
+    maxlag : list, tuple, array or int
+        Collection of lags, for which the causality analysis will be conducted. 
+        Lag is a number of past values used for predictions.
+        If int then all integers from 1 to maxlag are used as lag.
+    NN_config : list
+        List specifing the architecture of the neural network.
+        Each element of the list specifies one layer of the network.
+        This list should only contain:
+            'd' - fully connected (dense)
+            'g' - GRU
+            'l' - LSTM
+            'dr' - dropout
+    NN_neurons : list
+        List, that specifies the number of neurons/cells or dropout rate in each layer. 
+    x_test : numpyp.array, optional
+        2D Array with 2 columns containing X and Y signals respectively. 
+        This data is used for testing the models. 
+        If it is [], then x is used for testing.
+        The default is [].
+    run : int, optional
+        The number of repetitions of the neural network training processes to obtain the network that obtains the lowest RSS value. 
+        The default is 1.
+    z : numpy.array, optional
+        2D array of the train dataset, each column is another exogenous signal for conditional causality testing.
+        The default is [].
+    z_test : numpy.array, optional
+        2D array of the test dataset, each column is another exogenous signal for conditional causality testing.
+        The default is [].
+    epochs_num : list or int, optional
+        Number of epochs of training the models.
+        If it is list then the consecutive elements is corresponding to the consecutive values of learning rates in learning_rate.        
+        The default is 100.
+    learning_rate : list or int, optional
+        Learning rates used in training process.
+        The default is 0.01.
+    batch_size_num : int, optional
+        Number specifies the batch size. The default is 32.
+    verbose : bool, optional
+        Specifies whether the learning process should be printed. The default is True.
+    plot : bool, optional
+        Specifies whether the predicted values along with original signals should be plotted.
+        The default is False.
+
     Returns
     -------
-    results - dictionary, where the number of used lags is keys. Each key stores a list, which contains test results, the model for prediction of X fitted only on X time series, 
-    the model for prediction of X fitted on X and Y time series, number of differencing used for fitting those models.
-    '''
-    
-    # Checking the data correctness
-    if type(x) is np.ndarray:
-        if np.array(x.shape).shape[0] !=2:
-            raise Exception('x has wrong shape.')
-        elif x.shape[1] !=2:
-            raise Exception('x should have 2 columns.')
-        elif True in np.isnan(x):
-            raise ValueError('There is some NaN in x.')
-        elif True in np.isinf(x):
-            raise ValueError('There is some infinity value in x.')
-    else:
-        raise TypeError('x should be numpy.ndarray.')
-    
-    # Checking if maxlag has correct type and values
-    if type(maxlag) is list or type(maxlag) is np.ndarray or type(maxlag) is tuple:
-        lags = maxlag
-        for lag in lags:
-            if type(lag) is not int:
-                raise ValueError('Every element in maxlag should be a positive integer.')
-            elif lag<=0:
-                raise ValueError('Every element in maxlag should be a positive integer.')
-    elif type(maxlag) is int:
-        if maxlag>0:
-            lags = range(1,maxlag+1)
-        else:
-            raise ValueError('maxlag should be grater than 0.')
-    else:
-        raise TypeError('maxlag should be int, list, tuple or numpy.ndarray.')
-   
-    # Checking if d has correct type and value
-    if type(d) is not int:
-        raise TypeError('d should be an integer.')
-    elif d<0:
-        raise ValueError('d should be a nonnegative integer.')
-    
-   # Checking the test data correctness
-    isxtest = False
-    if type(xtest) is np.ndarray:
-        if np.array(xtest.shape).shape[0] !=2:
-            raise Exception('xtest has wrong shape.')
-        elif xtest.shape[1] !=2:
-            raise Exception('xtest has to many columns.')
-        elif True in np.isnan(xtest):
-            raise ValueError('There is some NaN in xtest.')
-        elif True in np.isinf(xtest):
-            raise ValueError('There is some infinity value in xtest.')
-        else:
-            isxtest = True
-    elif xtest==[]:
-        xtest=x
-    else:
-        raise TypeError('xtest should be numpy ndarray, or [].')  
-       
-    # Checking if z has correct type and values
-    if type(z) is np.ndarray:
-        if np.array(z.shape).shape[0] != 2:
-            raise Exception('z has wrong shape.')
-        elif z.shape[0] != x.shape[0]:
-            raise Exception('z should have the same length as x.')
-        elif True in np.isnan(z):
-            raise ValueError('There is some NaN in z.')
-        elif True in np.isinf(z):
-            raise ValueError('There is some infinity value in z.')
-    elif z != []:
-        raise TypeError('z should be numpy ndarray or [].')
-        
-    # Checking the z test data correctness
-    if type(ztest) is np.ndarray:
-        if np.array(ztest.shape).shape[0] != 2:
-            raise Exception('ztest has wrong shape.')
-        if ztest.shape[0] != xtest.shape[0]:
-            raise Exception('ztest should have the same length as xtest.')
-        elif True in np.isnan(ztest):
-            raise ValueError('There is some NaN in ztest.')
-        elif True in np.isinf(ztest):
-            raise ValueError('There is some infinity value in ztest.')
-    elif z!=[] and ztest==[] and isxtest==False:
-        ztest=z
-    elif z!=[] and ztest==[] and isxtest==True:
-        raise Exception('ztest should have the same length as xtest.')
-    elif ztest != []:
-        raise TypeError('ztest should be numpy ndarray, or [].')  
-        
-    # Checking if plot has correct type
-    if type(plot) is not bool:
-        raise TypeError('plot should be boolean.')
-        
-    # Number of samples in each time series
-    
-    results = dict()
-    
-    # Creating ARIMA models and testing for casuality for every lag specified by maxlag
-    for lag in lags:
-        X = x[lag:,0] # signal, that will be forecasting
-        length = x.shape[0]
-        Y = np.zeros([x.shape[0]-lag,lag]) # exogenous variable
-        for i in range(length-lag):
-            Y[i,:,] = x[i:i+lag,1] # in each row there is lag number of values of X and lag number of values of Y before the value in corresponding row in X
+    results : dictionary
+        Results of the causality analysis. Keys of the dictionary are lags for which analysis was conducted.
+        The dictionary values are of the ResultsNonlincausality class.
 
-        if z==[]:
-            modelX = ARIMA(X, order=(lag,d,lag))
-            modelXY = ARIMA(X, exog = Y, order=(lag,d,lag))
-        else:
-            z1 = np.zeros([z.shape[0]-lag,z.shape[1]*lag])
-            for i in range(length-lag):
-                z1[i,:,] = z[i:i+lag,:].reshape(1,-1) # in each row there is lag number of values of X and lag number of values of Y and z before the value in corresponding row in X
-            
-            modelX = ARIMA(X, exog = z1,order=(lag,d,lag))
-            zY = np.zeros([z.shape[0],z.shape[1]+1])
-            zY[:,0] = x[:,1]
-            zY[:,1:] = z[:,:]
-
-            zY_1 = np.zeros([zY.shape[0]-lag,zY.shape[1]*lag])
-            for i in range(length-lag):
-                zY_1[i,:,] = zY[i:i+lag,:].reshape(1,-1) # in each row there is lag number of values of X and lag number of values of Y and z before the value in corresponding row in X
-            modelXY = ARIMA(X, exog = zY_1, order=(lag,d,lag))
-
-        model_fitX = modelX.fit()
-        model_fitXY = modelXY.fit()
-
-        if z==[]:
-            length_test = xtest.shape[0]
-            Ytest = np.zeros([xtest.shape[0]-lag,lag]) # exogenous variable
-            for i in range(length_test-lag):
-                Ytest[i,:,] = xtest[i:i+lag,1] # in each row there is lag number of values of X and lag number of values of Y before the value in corresponding row in X
-            
-            model_fitX = model_fitX.apply(xtest[lag:,0])
-            model_fitXY = model_fitXY.apply(xtest[lag:,0], exog = Ytest)
-        else:
-            length_test = xtest.shape[0]
-            ztest_1 = np.zeros([ztest.shape[0]-lag,ztest.shape[1]*lag])
-            for i in range(length_test-lag):
-                ztest_1[i,:,] = ztest[i:i+lag,:].reshape(1,-1) # in each row there is lag number of values of X and lag number of values of Y and z before the value in corresponding row in X
-            zYt = np.zeros([ztest.shape[0],ztest.shape[1]+1])
-            zYt[:,0] = xtest[:,1]
-            zYt[:,1:] = ztest[:,:]
-            zYtest = np.zeros([ztest.shape[0]-lag,zYt.shape[1]*lag])
-            for i in range(length_test-lag):
-                zYtest[i,:,] = zYt[i:i+lag,:].reshape(1,-1) # in each row there is lag number of values of X and lag number of values of Y and z before the value in corresponding row in X
-
-            model_fitX = model_fitX.apply(xtest[lag:,0], exog = ztest_1)
-            model_fitXY = model_fitXY.apply(xtest[lag:,0], exog = zYtest)
-        
-        XpredX = model_fitX.predict(typ='levels')
-        XYpredX = model_fitXY.predict(typ='levels')
-
-        X_test = xtest[lag:,0]
-
-        errorX = X_test-XpredX
-        errorXY = X_test-XYpredX
-        RSS1 = sum(errorX**2)
-        RSS2 = sum(errorXY**2)
-
-        # Testing for statistically smaller forecast error for the model, which include X and Y
-        # Wilcoxon Signed Rank Test test   
-        S, p_value = stats.wilcoxon(np.abs(errorX),np.abs(errorXY),alternative='greater')
-        
-        if plot:
-            plt.figure(figsize=(10,7))
-            plt.plot(np.linspace(0,len(X_test),len(X_test)),X_test)
-            plt.plot(np.linspace(0,len(XpredX),len(XpredX)),XpredX)
-            plt.plot(np.linspace(0,len(XYpredX),len(XYpredX)),XYpredX)
-            plt.legend(['X','Pred. based on X','Pred. based on X and Y'])
-            plt.xlabel('Number of sample')
-            plt.ylabel('Predicted value')
-            plt.title('Lags:'+str(lag))
-            plt.show()
-        
-        print('lag=%d' %lag)
-        print("Statistics value =", S,"p-value =", p_value)
-        test_results = {"Wilcoxon test": ([S, p_value],['Statistics value', 'p-value'])}
-
-        results[lag] = ([test_results, model_fitX, model_fitXY, RSS1, RSS2, errorX, errorXY],
-                        ['test results','model including X', 'model including X and Y',
-                         'RSS of model based only on X', 'RSS of model based on X and Y',
-                         'errors from model based on X','errors from model based on X and Y'])
+    """
+    results = run_nonlincausality(
+        NN_architecture,
+        x,
+        maxlag,
+        NN_config,
+        NN_neurons,
+        None,
+        None,
+        x_test,
+        run,
+        z,
+        z_test,
+        None,
+        None,
+        epochs_num,
+        learning_rate,
+        batch_size_num,
+        verbose,
+        plot,
+        "NN",
+    )
 
     return results
+
+
+#%% ARIMA
+def nonlincausalityARIMA(x, maxlag, x_test=[], z=[], z_test=[], plot=True):
+
+    # If maxlag is int the test is made for every integer  from 1 to maxlag
+    if isinstance(maxlag, int):
+        lags = range(1, maxlag + 1)
+    else:
+        lags = maxlag
+    # If there is no x_test data causality analysis is performed on x data
+    is_x_test = True
+    if len(x_test) == 0:
+        x_test = x
+        is_x_test = False
+    if len(z) > 0 and len(z_test) == 0 and is_x_test == False:
+        z_test = z
+    results = {}
+
+    # Creating ARIMA/ARIMAX models and testing
+    # for casuality for every lag specified by maxlag
+    for lag in lags:
+        result_lag = ResultsNonlincausality()
+        # Test signal, that will be forecasting
+        X_test = x_test[lag:, 0]
+
+        data_Y = lagmat2ds(x[:, 1], lag - 1, trim="both")
+        data_Y_test = lagmat2ds(x_test[:, 1], lag - 1, trim="both")
+        if len(z) > 0:
+            for col in range(z.shape[1]):
+                data_Z_tmp = lagmat2ds(z[:, col], lag - 1, trim="both")
+                data_Z_test_tmp = lagmat2ds(z_test[:, col], lag - 1, trim="both")
+
+                if col == 0:
+                    data_Z = data_Z_tmp
+                    data_Z_test = data_Z_test_tmp
+                else:
+                    data_Z = np.concatenate([data_Z, data_Z_tmp], axis=1)
+                    data_Z_test = np.concatenate([data_Z_test, data_Z_test_tmp], axis=1)
+            data_Y = np.concatenate([data_Z, data_Y], axis=1)
+            data_Y_test = np.concatenate([data_Z_test, data_Y_test], axis=1)
+            
+        if len(z) > 0:
+            model_X = ARIMA(x[lag - 1 :, 0], exog=data_Z, order=(lag, 1, lag))
+        else:
+            model_X = ARIMA(x[:, 0], order=(lag, 1, lag))
+            
+        model_XY = ARIMA(x[lag - 1 :, 0], exog=data_Y, order=(lag, 1, lag))
+
+        model_X = model_X.fit()
+        model_XY = model_XY.fit()
+
+        if len(z) > 0:
+            model_X = model_X.apply(x_test[lag - 1 :, 0], exog=data_Z_test)
+        else:
+            model_X = model_X.apply(x_test[:, 0])
+        model_XY = model_XY.apply(x_test[lag - 1 :, 0], exog=data_Y_test)
+
+        XpredX = model_X.predict(typ="levels")
+        XYpredX = model_XY.predict(typ="levels")
+
+        if len(z) > 0:
+            error_X = X_test[lag - 1 :] - XpredX[lag:]
+        else:
+            error_X = X_test[lag - 1 :] - XpredX[2 * lag - 1 :]
+        error_XY = X_test[lag - 1 :] - XYpredX[lag:]
+        # Testing if model using both X and Y has statistically smaller error,
+        # than model using only X (if there is causality Y->X)
+        # using Wilcoxon Signed Rank Test test
+        S, p_value = stats.wilcoxon(
+            np.abs(error_X), np.abs(error_XY), alternative="greater"
+        )
+
+        result_lag.append_results(
+            sum(error_X ** 2),
+            sum(error_XY ** 2),
+            model_X,
+            model_XY,
+            None,
+            None,
+            error_X,
+            error_XY,
+        )
+        result_lag.set_best_results(0, 0)
+
+        result_lag.p_value = p_value
+        result_lag.test_statistic = S
+
+        # Printing the tests results
+        print("Statistics value =", S, "p-value =", p_value)
+        # Plotting the original X test signal along with the predicted values
+        if plot:
+            if len(z) > 0:
+                plot_predicted(
+                    X_test[lag - 1 :], XpredX[lag:], XYpredX[lag:], lag
+                )
+            else:
+                plot_predicted(
+                    X_test[lag - 1 :], XpredX[2 * lag - 1 :], XYpredX[lag:], lag
+                )
+        results[lag] = result_lag
+        
+    return results
+
+
+
+#%% inside of the nonlincausalitymeasure functions
+def run_nonlincausality_measure(
+    nonlincausality_function,
+    x,
+    maxlag,
+    window,
+    step,
+    Network_layers,
+    Network_neurons,
+    Dense_layers,
+    Dense_neurons,
+    x_test,
+    run,
+    z,
+    z_test,
+    add_Dropout,
+    Dropout_rate,
+    epochs_num,
+    learning_rate,
+    batch_size_num,
+    verbose,
+    plot,
+    plot_causality,
+    function_type,
+):
+    """
+    Parameters
+    ----------
+    nonlincausality_function : function
+        nonlincausality function.
+    x : numpy.array
+        2D Array with 2 columns containing X and Y signals respectively. 
+        Using this function it is tested if Y->X.
+        This data is used for training the models.
+    maxlag : list, tuple, array or int
+        Collection of lags, for which the causality analysis will be conducted. 
+        Lag is a number of past values used for predictions.
+        If int then all integers from 1 to maxlag are used as lag.
+    window : int
+        Number of samples, which are taken to count RMSE in measure of causality. (former w1)
+    step : int
+        Step of the window. (former w2)
+    Network_layers : int or list
+        Number of LSTM/GRU/MLP cells/layer or 
+        list specifing the architecture of the neural network (NN_config).
+    Network_neurons : list
+        List with the numbers of LSTM/GRU/MLP cells/neurons in each layer,
+        or list, that specifies the number of neurons/cells or dropout rate in each layer (NN_neurons).
+    Dense_layers : int
+        Number of Dense layers after LSTM layers. The default is 0.
+    Dense_neurons : list
+        List with the numbers of neurons in each fully-connecred layer. 
+        The default is [].
+    x_test : numpy.array
+        2D Array with 2 columns containing X and Y signals respectively. 
+        This data is used for testing the models. 
+        If it is [], then x is used for testing.
+        The default is [].
+    run : int
+        The number of repetitions of the neural network training processes to obtain the network that obtains the lowest RSS value. 
+        The default is 1.
+    z : numpy.array
+        2D array of the train dataset, each column is another exogenous signal for conditional causality testing.
+        The default is [].
+    z_test : numpy.array
+        2D array of the test dataset, each column is another exogenous signal for conditional causality testing.
+        The default is [].
+    add_Dropout : bool
+        Specifies whether dropout regularization should be applied.
+        The default is True.
+    Dropout_rate : float
+        Dropout rate - the number between 0 and 1.
+        The default is 0.1.
+    epochs_num : list or int
+        Number of epochs of training the models.
+        If it is list then the consecutive elements is corresponding to the consecutive values of learning rates in learning_rate.        
+        The default is 100.
+    learning_rate : list or int
+        Learning rates used in training process.
+        The default is 0.01.
+    batch_size_num : int
+        Number specifies the batch size. The default is 32.
+    verbose : bool
+        Specifies whether the learning process should be printed. The default is True.
+    plot : bool
+        Specifies whether the predicted values along with original signals should be plotted.
+        The default is False.
+    plot_causality : bool
+        Specifies whether the calculated causality values along with original signals should be plotted.
+        The default is False.
+    functin_type : string
+        Name of the function type - 'LSTM', 'GRU', 'MLP' or 'NN'.
+
+    Returns
+    -------
+    results : dictionary
+        A dictionary whose key is the string specifying two columns of 
+        the attribute x and the direction of the causality 
+        (e.g. '0->1', or '1->0' if there are only 2 columns in x).
+        Under each key there is a list. Its first element is pandas.Series,
+        which contains values of causality change over time. 
+        Second element is the causality value for the whole singals.
+        Third element is the result of function nonlincausality<function_type>.
+
+    """
+    # Checking the correctness of the input arguments
+    check_input_measure(window, step)
+
+    # If maxlag is int the test is made for every integer from 1 to maxlag
+    if isinstance(maxlag, int):
+        lags = range(1, maxlag + 1)
+    else:
+        lags = maxlag
+        
+    x_currently_analized = np.zeros([x.shape[0], 2])
+    x_test_currently_analized = np.zeros([x_test.shape[0], 2])
+    results = {}
+    length = x_test.shape[0]
+
+    # In terms of testing Y->X, this loop is responsible for choosing X
+    for signal_1 in range(x.shape[1]):
+        # This one is responsible for choosing Y
+        for signal_2 in range(x.shape[1]):
+            if signal_1 == signal_2:
+                continue  # not to calculate causality for X->X
+            else:
+                # Choosing time series, which will be examin in this iteration
+                x_currently_analized[:, 0] = x[:, signal_1]
+                x_currently_analized[:, 1] = x[:, signal_2]
+
+                # Choosing corresponding test time series
+                x_test_currently_analized[:, 0] = x_test[:, signal_1]
+                x_test_currently_analized[:, 1] = x_test[:, signal_2]
+
+                print(str(signal_1) + "->" + str(signal_2))
+
+                if function_type in ["LSTM", "GRU"]:
+                    results_idx = nonlincausality_function(
+                        x_currently_analized,
+                        maxlag,
+                        Network_layers,
+                        Network_neurons,
+                        Dense_layers,
+                        Dense_neurons,
+                        x_test_currently_analized,
+                        run,
+                        z,
+                        z_test,
+                        add_Dropout,
+                        Dropout_rate,
+                        epochs_num,
+                        learning_rate,
+                        batch_size_num,
+                        verbose,
+                        plot,
+                    )
+                elif function_type == "MLP":
+                    results_idx = nonlincausality_function(
+                        x_currently_analized,
+                        maxlag,
+                        Dense_layers,
+                        Dense_neurons,
+                        x_test_currently_analized,
+                        run,
+                        z,
+                        z_test,
+                        add_Dropout,
+                        Dropout_rate,
+                        epochs_num,
+                        learning_rate,
+                        batch_size_num,
+                        verbose,
+                        plot,
+                    )
+                else:
+                    results_idx = nonlincausality_function(
+                        x_currently_analized,
+                        maxlag,
+                        Network_layers,
+                        Network_neurons,
+                        x_test_currently_analized,
+                        run,
+                        z,
+                        z_test,
+                        epochs_num,
+                        learning_rate,
+                        batch_size_num,
+                        verbose,
+                        plot,
+                    )
+                # Value of the change of causality over time
+                causality_values_lags = {}
+                # Value of the causality for the whole signals
+                causality_all_lags = {}
+
+                # Calculating the change of causality over time for every lag
+                for lag in lags:
+                    # Signal, that will be forecasting
+                    X_test = x_test_currently_analized[lag:, 0]
+
+                    # Preparing the input data (train and test) for 2 models
+                    data_X, data_XY, data_X_test, data_XY_test = prepare_data(
+                        x_currently_analized, 
+                        x_test_currently_analized, 
+                        lag, 
+                        z, 
+                        z_test
+                    )
+                    # Calculating predictions and errors for both models
+                    XpredX, XYpredX, error_X, error_XY = calculate_pred_and_errors(
+                        X_test,
+                        data_X_test,
+                        data_XY_test,
+                        results_idx[lag].best_model_X,
+                        results_idx[lag].best_model_XY,
+                    )
+
+                    causality_values = calculate_causality_over_time(
+                        error_X, 
+                        error_XY, 
+                        window, 
+                        step, 
+                        lag
+                    )
+
+                    # Plotting the change of causality over time
+                    if plot_causality:
+                        if signal_1 < signal_2:
+                            lines = plot_causality_over_time_part1(
+                                signal_1,
+                                signal_2,
+                                lag,
+                                length,
+                                x_test_currently_analized,
+                                causality_values,
+                            )
+                        else:
+                            plot_causality_over_time_part2(
+                                signal_1, 
+                                signal_2, 
+                                lag, 
+                                causality_values, 
+                                lines
+                            )
+                    causality_values_lags[lag] = causality_values
+
+                    causality_all_lags[lag] = calculate_causality(error_X, error_XY)
+                    
+                # Values of the change of causality over time, 
+                # value of causality of the whole signals, 
+                # results from the causality analysis
+                results[str(signal_1) + "->" + str(signal_2)] = (
+                    causality_values_lags,
+                    causality_all_lags,
+                    results_idx,
+                )
+                
+    return results
+
 
 #%% Measure LSTM
-
-def nonlincausalitymeasureLSTM(x, maxlag, w1, w2, LSTM_layers, LSTM_neurons, run=1, Dense_layers=0, Dense_neurons=[], xtest=[], z=[], ztest=[], add_Dropout=True, Dropout_rate=0.1, epochs_num=100, learning_rate=0.01, batch_size_num=32, verbose=True, plot=False, plot_res = True, plot_with_xtest = True):
-    
-    '''
-    This function is using modified Granger causality test to examin mutual causality in 2 or more time series.
-    It is using nonlincausalityLSTM function for creating prediction models.
-    A measure of causality is derived from these models asa sigmoid fuction
-    2/(1 + e^(-(RMSE1/RMSE2-1)))-1
-    Where
-    RMSE1 is root mean square error obtained from model using only past of X to predict X.
-    RMSE2 is root mean square error obtained from model using past of X and Y to predict X.
-    
-    RMSE is counted from w1 moments of time series with a step equal to w2.
-    
-    This function is counting mutual causality for every pair of time series contained in columns of x.
-    
+def nonlincausalitymeasureLSTM(
+    x,
+    maxlag,
+    window,
+    step,
+    LSTM_layers,
+    LSTM_neurons,
+    Dense_layers=0,
+    Dense_neurons=[],
+    x_test=[],
+    run=1,
+    z=[],
+    z_test=[],
+    add_Dropout=True,
+    Dropout_rate=0.1,
+    epochs_num=100,
+    learning_rate=0.01,
+    batch_size_num=32,
+    verbose=True,
+    plot=False,
+    plot_causality=True,
+):
+    """
     Parameters
     ----------
-    x - numpy ndarray, where each column corresponds to one time series. 
-    
-    maxlag - int, list, tuple or numpy ndarray. If maxlag is int, then test for causality is made for lags from 1 to maxlag.
-    If maxlag is list, tuple or numpy ndarray, then test for causality is made for every number of lags in maxlag.
-    
-    w1 - number of samples, which are taken to count RMSE in measure of causality.
-    
-    w2 - number of sample steps for counting RMSE in measure of causality.
-    
-    LSTM_layers - int, number of LSTM layers in the model. 
-    
-    LSTM_neurons - list, tuple or numpy array, where the number of elements should be equal to the number of LSTM layers specified in LSTM_layers. The first LSTM layer has the number of neurons equal to the first element in LSTM_neurns,
-    the second layer has the number of neurons equal to the second element in LSTM_neurons and so on.
-    
-    Dense_layers - int, number of Dense layers, besides the last one, which is the output layer.
-    
-    Dense_neurons - list, tuple or numpy array, where the number of elements should be equal to the number of Dense layers specified in Dense_layers. 
-    
-    xtest - numpy ndarray, where each column corresponds to one time series, as in the variable x. This data will be used for testing hypothesis. 
+    x : numpy.array
+        2D Array with at least 2 columns. 
+        Causality analysis will be conducted for each pair of the signals (columns)
+        E.g. if there are 2 colums containing X and Y singals the causality change over time will be calculated for both X->Y and Y->X.
+        This data is used for training the models.
+    maxlag : list, tuple, array or int
+        Collection of lags, for which the causality analysis will be conducted. 
+        Lag is a number of past values used for predictions.
+        If int then all integers from 1 to maxlag are used as lag.
+    window : int
+        Number of samples, which are taken to count RMSE in measure of causality. (former w1)
+    step : int
+        Step of the window. (former w2)
+    LSTM_layers : int
+        Number of LSTM layers
+    LSTM_neurons : list
+        List with the numbers of LSTM cells in each LSTM layer
+    Dense_layers : int, optional
+        Number of Dense layers after LSTM layers. The default is 0.
+    Dense_neurons : list, optional
+        List with the numbers of neurons in each fully-connecred layer. 
+        The default is []. 
+    x_test : numpy.array, optional
+        2D Array with at least 2 columns as in x.
+        This data is used for testing the models. 
+        If it is [], then x is used for testing.
+        The default is [].
+    run : int, optional
+        The number of repetitions of the neural network training processes to obtain the network that obtains the lowest RSS value. 
+        The default is 1.
+    z : numpy.array, optional
+        2D array of the train dataset, each column is another exogenous signal for conditional causality testing.
+        The default is [].
+    z_test : numpy.array, optional
+        2D array of the test dataset, each column is another exogenous signal for conditional causality testing.
+        The default is [].
+    add_Dropout : bool, optional
+        Specifies whether dropout regularization should be applied.
+        The default is True.
+    Dropout_rate : float
+        Dropout rate - the number between 0 and 1.
+        The default is 0.1.
+    epochs_num : list or int, optional
+        Number of epochs of training the models.
+        If it is list then the consecutive elements is corresponding to the consecutive values of learning rates in learning_rate.        
+        The default is 100.
+    learning_rate : list or int, optional
+        Learning rates used in training process.
+        The default is 0.01.
+    batch_size_num : int, optional
+        Number specifies the batch size. The default is 32.
+    verbose : bool, optional
+        Specifies whether the learning process should be printed. The default is True.
+    plot : bool, optional
+        Specifies whether the predicted values along with original signals should be plotted.
+        The default is False.
+    plot_causality : bool, optional
+        Specifies whether the calculated causality change over time should be plotted. 
+        The default is True.
 
-    z - numpy ndarray (or [] if not applied), where each column corresponds to one time series. This variable is for testing conditional causality. 
-    In this approach, the first model is forecasting the present value of X based on past values of X and z, while the second model is forecasting the same value based on the past of X, Y and z.
-    
-    ztest - numpy ndarray (or [] if not applied), where each column corresponds to one time series, as in the variable z. This data will be used for testing hypothesis. 
-
-    add_Dropout - boolean, if True, than Dropout layer is added after each LSTM and Dense layer, besides the output layer.
-    
-    Dropout_rate - float, parameter 'rate' for Dropout layer.
-    
-    epochs_num -  int or list, number of epochs used for fitting the model. If list, then the length should be equal to number of different learning rates used
-    
-    learning_rate - float or list, the applied learning rate for the training process. If list, then the length should be equal to the lenth of epochs_num list.
-    
-    batch_size_num -  int, number of batch size for fitting the model.
-    
-    verbose - boolean, if True, then results are shown after each lag. 
-    
-    plot - boolean, if True plots of original and predicted values are made after each lag.
-    
-    plot_res - boolean, if True plots of results (causality measures) are made.
-    
-    plot_with_xtest - boolean, if True data from xtest are plotted on the same figure as the results. 
-    
     Returns
     -------
-    results - dictionary, where "number of one column -> number of another column" (eg. "0->1") are keys. 
-    Each key stores a list, which contains measures of causality, numbers of samples at the end of the step and results from nonlincausalityLSTM() function.
- 
-    '''
-    
-    # Checking the data correctness
-    if type(x) is np.ndarray:
-        if np.array(x.shape).shape[0] !=2:
-            raise Exception('x has wrong shape.')
-        elif x.shape[1] == 1:
-            raise Exception('x should have at least 2 columns.')
-        elif True in np.isnan(x):
-            raise ValueError('There is some NaN in x.')
-        elif True in np.isinf(x):
-            raise ValueError('There is some infinity value in x.')
-    else:
-        raise TypeError('x should be numpy ndarray.')
-    
-    # Checking if maxlag has correct type and values
-    if type(maxlag) is list or type(maxlag) is np.ndarray or type(maxlag) is tuple:
-        lags = maxlag
-        for lag in lags:
-            if type(lag) is not int:
-                raise ValueError('Every element in maxlag should be an integer.')
-            elif lag<=0:
-                raise ValueError('Every element in maxlag should be a positive integer.')
-    elif type(maxlag) is int:
-        if maxlag>0:
-            lags = range(1,maxlag+1)
-        else:
-            raise ValueError('maxlag should be grater than 0.')
-    else:
-        raise TypeError('maxlag should be int, list, tuple or numpy ndarray.')
+    results : dictionary
+        A dictionary whose key is the string specifying two columns of 
+        the attribute x and the direction of the causality 
+        (e.g. '0->1', or '1->0' if there are only 2 columns in x).
+        Under each key there is a list. Its first element is pandas.Series,
+        which contains values of causality change over time. 
+        Second element is the causality value for the whole singals.
+        Third element is the result of function nonlincausalityLSTM.
         
-    # Checking the test data correctness
-    if type(xtest) is np.ndarray:
-        if xtest.shape[1] !=x.shape[1]:
-            raise Exception('xtest should have the same number of columns as x.')
-        elif True in np.isnan(xtest):
-            raise ValueError('There is some NaN in xtest.')
-        elif True in np.isinf(xtest):
-            raise ValueError('There is some infinity value in xtest.')
-    elif xtest==[]:
-        xtest=x
-    else:
-        raise TypeError('xtest should be numpy ndarray, or [].')  
-        
-    if type(w1) is int:
-        if w1<=0:
-            raise ValueError('w1 should be grater than 0')
-    else:
-        raise ValueError('w1 should be an integer')
-        
-    if type(w2) is int:
-        if w2<=0:
-            raise ValueError('w2 should be grater than 0')
-    else:
-        raise ValueError('w2 should be an integer')
-        
-    xx = np.zeros([x.shape[0],2])
-    xxtest = np.zeros([xtest.shape[0],2])
-    results = dict()
-    length = xtest.shape[0]
-    
-    for i in range(x.shape[1]): # In terms of testing Y->X, this loop is responsible for choosing Y
-        for j in range(x.shape[1]): # This one is responsible for choosing X
-            if i==j:
-                continue # not to calculate causality for X->X
-            else:
-                xx[:,0] = x[:,i]    # Choosing time series, which will be examin in this iteration
-                xx[:,1] = x[:,j]
-                
-                xxtest[:,0] = xtest[:,i] # Choosing corresponding test time series
-                xxtest[:,1] = xtest[:,j]
-                
-                print(str(i)+'->'+str(j)) 
-                
-                res = nonlincausalityLSTM(xx, maxlag, LSTM_layers, LSTM_neurons, run, Dense_layers, Dense_neurons, xxtest, z, ztest, add_Dropout, Dropout_rate, epochs_num, learning_rate, batch_size_num, verbose, plot) # creating model using only past of X, and model using past of X and Y
-                
-                VC_res = dict() # value of causality
-                VC2_res = dict()
-                VCX_res = dict()
-                
-                for lag in lags: # counting change of causality for every lag
-                    modelX = res[lag][0][1] # model using only past of X
-                    modelXY = res[lag][0][2]  # model using past of X and Y
-                    
-                    X = xxtest[lag:,0] # signal, that will be forecasting
-        
-                    # test data for model based only on X (and z if set)
-                    if z!=[]:
-                        xztest= np.concatenate((ztest,xtest[:,0].reshape(xtest.shape[0],1)),axis=1)
-                        dataXtest = np.zeros([xztest.shape[0]-lag,lag,xztest.shape[1]]) # input matrix for training the model only with data from X time series
-                        for k in range(length-lag):
-                            dataXtest[k,:,:]=xztest[k:k+lag,:]    # each row is lag number of values before the value in corresponding row in X
-                    else:
-                        dataXtest = np.zeros([xtest.shape[0]-lag,lag]) # input matrix for testing the model only with data from X time series
-                        for k in range(xtest.shape[0]-lag):
-                            dataXtest[k,:]=xtest[k:k+lag,0]    # each row is lag number of values before the value in corresponding row in X
-                        dataXtest = dataXtest.reshape(dataXtest.shape[0],dataXtest.shape[1],1) # reshaping the data to meet the requirements of the model
-                    
-                    # test testing data for model based on X and Y (and z if set)
-                    if z!=[]:
-                        xztest= np.concatenate((ztest,xtest),axis=1)
-                    else:
-                        xztest=xtest
-                    dataXYtest = np.zeros([xztest.shape[0]-lag,lag,xztest.shape[1]]) # input matrix for training the model with data from X and Y time series
-                    for k in range(length-lag):
-                        dataXYtest[k,:,:] = xztest[k:k+lag,:] # in each row there is lag number of values of X and lag number of values of Y before the value in corresponding row in X
+    """
+    results = run_nonlincausality_measure(
+        nonlincausalityLSTM,
+        x,
+        maxlag,
+        window,
+        step,
+        LSTM_layers,
+        LSTM_neurons,
+        Dense_layers,
+        Dense_neurons,
+        x_test,
+        run,
+        z,
+        z_test,
+        add_Dropout,
+        Dropout_rate,
+        epochs_num,
+        learning_rate,
+        batch_size_num,
+        verbose,
+        plot,
+        plot_causality,
+        function_type="LSTM",
+    )
 
-                    XpredX = modelX.predict(dataXtest) # prediction of X based on past of X
-                    XpredX = XpredX.reshape(XpredX.size)
-                    errorX = X-XpredX
-                    
-                    XYpredX = modelXY.predict(dataXYtest)  # forecasting X based on the past of X and Y
-                    XYpredX = XYpredX.reshape(XYpredX.size)
-                    errorXY = X-XYpredX
-                    
-                    T = X.size
-                    VC = np.ones([int(np.ceil((T)/w2))]) # initializing variable for the causality measure
-                    VCX = np.ones([int(np.ceil((T)/w2))]) # initializing variable for numbers of samples at the end of each step
-                    all1 = False
-                    for n, k in enumerate(range(0,T,w2)): # counting value of causality starting from moment w1 with step equal to w2 till the end of time series
-                        VC[n] = 2/(1 + np.exp(-(np.sqrt(np.mean(errorX[k-w1:k]**2))/np.sqrt(np.mean(errorXY[k-w1:k]**2))-1)))-1 # value of causality as a sigmoid function of quotient of errors
-                        VCX[n] = k-w1
-                        if VC[n]<0: # if performance of modelX was better than performance of modelXY
-                            VC[n] = 0 # that means there is no causality
-                        if X[k]==X[-1]: # if the causality of the whole range of time series was calculated
-                            all1=True # there is no need for further calculations
-                    if all1==False: # otherwise calculations must be done for the end of the signal
-                        VC[-1] = 2/(1 + np.exp(-(np.sqrt(np.mean(errorX[-w1:]**2))/np.sqrt(np.mean(errorXY[-w1:]**2))-1)))-1
-                        VCX[-1] = T-w1
-                        if VC[-1]<0:
-                            VC[-1] = 0
-                    print('i = ' +str(i)+', j = '+str(j)+', lag = '+str(lag))
-                    if plot_res:
-                        plt.figure('lag '+str(lag)+' '+ str(min([i,j]))+' and ' + str(max([i,j])))
-                        plt.plot(VCX, VC)
-                        if j<i and plot_with_xtest:
-                            plt.plot(range(0,T),xxtest[lag:,0],range(0,T),xxtest[lag:,1], alpha=0.5)
-                            plt.legend([str(i)+'->'+str(j),str(j)+'->'+str(i),str(i),str(j)])
-                        elif j<i:
-                            plt.legend([str(i)+'->'+str(j),str(j)+'->'+str(i)])
-
-                    VCX_res[lag] = VCX    
-                    VC_res[lag] = VC
-                    VC2_res[lag] = np.log(np.var(errorX)/np.var(errorXY)) # value of causality for the whole signal
-                    
-                results[str(i)+'->'+str(j)] = ([VC_res, VC2_res, VCX_res, res],['measure of change of causality', 'measure of causality for whole signal','numbers of samples at the end of the step','results from nonlincausalityLSTM function'])
-                
     return results
 
+
 #%% Measure GRU
-    
-def nonlincausalitymeasureGRU(x, maxlag, w1, w2, GRU_layers, GRU_neurons, run=1, Dense_layers=0, Dense_neurons=[], xtest=[], z=[], ztest=[], add_Dropout=True, Dropout_rate=0.1, epochs_num=100, learning_rate=0.01, batch_size_num=32, verbose=True, plot=False, plot_res = True, plot_with_xtest = True):
-    
-    '''
-    This function is using modified Granger causality test to examin mutual causality in 2 or more time series.
-    It is using nonlincausalityGRU function for creating prediction models.
-    A measure of causality is derived from these models asa sigmoid fuction
-    2/(1 + e^(-(RMSE1/RMSE2-1)))-1
-    Where
-    RMSE1 is root mean square error obtained from model using only past of X to predict X.
-    RMSE2 is root mean square error obtained from model using past of X and Y to predict X.
-    
-    RMSE is counted from w1 moments of time series with a step equal to w2.
-    
-    This function is counting mutual causality for every pair of time series contained in columns of x.
- 
+def nonlincausalitymeasureGRU(
+    x,
+    maxlag,
+    window,
+    step,
+    GRU_layers,
+    GRU_neurons,
+    Dense_layers=0,
+    Dense_neurons=[],
+    x_test=[],
+    run=1,
+    z=[],
+    z_test=[],
+    add_Dropout=True,
+    Dropout_rate=0.1,
+    epochs_num=100,
+    learning_rate=0.01,
+    batch_size_num=32,
+    verbose=True,
+    plot=False,
+    plot_causality=True,
+):
+    """
     Parameters
     ----------
-    x - numpy ndarray, where each column corresponds to one time series. 
-    
-    maxlag - int, list, tuple or numpy ndarray. If maxlag is int, then test for causality is made for lags from 1 to maxlag.
-    If maxlag is list, tuple or numpy ndarray, then test for causality is made for every number of lags in maxlag.
-    
-    w1 - number of samples, which are taken to count RMSE in measure of causality.
-    
-    w2 - number of sample steps for counting RMSE in measure of causality.
-    
-    GRU_layers - int, number of GRU layers in the model. 
-    
-    GRU_neurons - list, tuple or numpy array, where the number of elements should be equal to the number of GRU layers specified in GRU_layers. The First GRU layer has the number of neurons equal to the first element in GRU_neurns,
-    the second layer has the number of neurons equal to the second element in GRU_neurons and so on.
-    
-    Dense_layers - int, number of Dense layers, besides the last one, which is the output layer.
-    
-    Dense_neurons - list, tuple or numpy array, where the number of elements should be equal to the number of Dense layers specified in Dense_layers. 
-    
-    xtest - numpy ndarray, where each column corresponds to one time series, as in the variable x. This data will be used for testing hypothesis. 
+    x : numpy.array
+        2D Array with at least 2 columns. 
+        Causality analysis will be conducted for each pair of the signals (columns)
+        E.g. if there are 2 colums containing X and Y singals the causality change over time will be calculated for both X->Y and Y->X.
+        This data is used for training the models.
+    maxlag : list, tuple, array or int
+        Collection of lags, for which the causality analysis will be conducted. 
+        Lag is a number of past values used for predictions.
+        If int then all integers from 1 to maxlag are used as lag.
+    window : int
+        Number of samples, which are taken to count RMSE in measure of causality. (former w1)
+    step : int
+        Step of the window. (former w2)
+    GRU_layers : int
+        Number of GRU layers
+    GRU_neurons : list
+        List with the numbers of GRU cells in each GRU layer
+    Dense_layers : int, optional
+        Number of Dense layers after LSTM layers. The default is 0.
+    Dense_neurons : list, optional
+        List with the numbers of neurons in each fully-connecred layer. 
+        The default is []. 
+    x_test : numpy.array, optional
+        2D Array with at least 2 columns as in x.
+        This data is used for testing the models. 
+        If it is [], then x is used for testing.
+        The default is [].
+    run : int, optional
+        The number of repetitions of the neural network training processes to obtain the network that obtains the lowest RSS value. 
+        The default is 1.
+    z : numpy.array, optional
+        2D array of the train dataset, each column is another exogenous signal for conditional causality testing.
+        The default is [].
+    z_test : numpy.array, optional
+        2D array of the test dataset, each column is another exogenous signal for conditional causality testing.
+        The default is [].
+    add_Dropout : bool, optional
+        Specifies whether dropout regularization should be applied.
+        The default is True.
+    Dropout_rate : float
+        Dropout rate - the number between 0 and 1.
+        The default is 0.1.
+    epochs_num : list or int, optional
+        Number of epochs of training the models.
+        If it is list then the consecutive elements is corresponding to the consecutive values of learning rates in learning_rate.        
+        The default is 100.
+    learning_rate : list or int, optional
+        Learning rates used in training process.
+        The default is 0.01.
+    batch_size_num : int, optional
+        Number specifies the batch size. The default is 32.
+    verbose : bool, optional
+        Specifies whether the learning process should be printed. The default is True.
+    plot : bool, optional
+        Specifies whether the predicted values along with original signals should be plotted.
+        The default is False.
+    plot_causality : bool, optional
+        Specifies whether the calculated causality change over time should be plotted. 
+        The default is True.
 
-    z - numpy ndarray (or [] if not applied), where each column corresponds to one time series. This variable is for testing conditional causality. 
-    In this approach, the first model is forecasting the present value of X based on past values of X and z, while the second model is forecasting the same value based on the past of X, Y and z.
-    
-    ztest - numpy ndarray (or [] if not applied), where each column corresponds to one time series, as in the variable z. This data will be used for testing hypothesis. 
-
-    add_Dropout - boolean, if True, than Dropout layer is added after each GRU and Dense layer, besides the output layer.
-    
-    Dropout_rate - float, parameter 'rate' for Dropout layer.
-    
-    epochs_num -  int or list, number of epochs used for fitting the model. If list, then the length should be equal to number of different learning rates used
-    
-    learning_rate - float or list, the applied learning rate for the training process. If list, then the length should be equal to the lenth of epochs_num list.
-    
-    batch_size_num -  int, number of batch size for fitting the model.
-    
-    verbose - boolean, if True, then results are shown after each lag. 
-    
-    plot - boolean, if True plots of original and predicted values are made after each lag.
-    
-    plot_res - boolean, if True plots of results (causality measures) are made.
-    
-    plot_with_xtest - boolean, if True data from xtest are plotted on the same figure as the results. 
-    
     Returns
     -------
-    results - dictionary, where "number of one column -> number of another column" (eg. "0->1") are keys. 
-    Each key stores a list, which contains measures of causality, numbers of samples at the end of the step and results from nonlincausalityGRU() function. 
-    
-    '''
-    # Checking the data correctness
-    if type(x) is np.ndarray:
-        if np.array(x.shape).shape[0] !=2:
-            raise Exception('x has wrong shape.')
-        elif x.shape[1] == 1:
-            raise Exception('x should have at least 2 columns.')
-        elif True in np.isnan(x):
-            raise ValueError('There is some NaN in x.')
-        elif True in np.isinf(x):
-            raise ValueError('There is some infinity value in x.')
-    else:
-        raise TypeError('x should be numpy ndarray.')
-    
-    # Checking if maxlag has correct type and values
-    if type(maxlag) is list or type(maxlag) is np.ndarray or type(maxlag) is tuple:
-        lags = maxlag
-        for lag in lags:
-            if type(lag) is not int:
-                raise ValueError('Every element in maxlag should be an integer.')
-            elif lag<=0:
-                raise ValueError('Every element in maxlag should be a positive integer.')
-    elif type(maxlag) is int:
-        if maxlag>0:
-            lags = range(1,maxlag+1)
-        else:
-            raise ValueError('maxlag should be grater than 0.')
-    else:
-        raise TypeError('maxlag should be int, list, tuple or numpy ndarray.')
-    
-    # Checking the test data correctness
-    if type(xtest) is np.ndarray:
-        if xtest.shape[1] !=x.shape[1]:
-            raise Exception('xtest should have the same number of columns as x.')
-        elif True in np.isnan(xtest):
-            raise ValueError('There is some NaN in xtest.')
-        elif True in np.isinf(xtest):
-            raise ValueError('There is some infinity value in xtest.')
-    elif xtest==[]:
-        xtest=x
-    else:
-        raise TypeError('xtest should be numpy ndarray, or [].')  
+    results : dictionary
+        A dictionary whose key is the string specifying two columns of 
+        the attribute x and the direction of the causality 
+        (e.g. '0->1', or '1->0' if there are only 2 columns in x).
+        Under each key there is a list. Its first element is pandas.Series,
+        which contains values of causality change over time. 
+        Second element is the causality value for the whole singals.
+        Third element is the result of function nonlincausalityGRU.
         
-    if type(w1) is int:
-        if w1<=0:
-            raise ValueError('w1 should be grater than 0')
-    else:
-        raise ValueError('w1 should be an integer')
-        
-    if type(w2) is int:
-        if w2<=0:
-            raise ValueError('w2 should be grater than 0')
-    else:
-        raise ValueError('w2 should be an integer')
-        
-    xx = np.zeros([x.shape[0],2])
-    xxtest = np.zeros([xtest.shape[0],2])
-    results = dict()
-    length = xtest.shape[0]
-    for i in range(x.shape[1]): # In terms of testing Y->X, this loop is responsible for choosing Y
-        for j in range(x.shape[1]): # This one is responsible for choosing X
-            if i==j:
-                continue # not to calculate causality for X->X
-            else:
-                xx[:,0] = x[:,i]    # Choosing time series, which will be examin in this iteration
-                xx[:,1] = x[:,j]
-                
-                xxtest[:,0] = xtest[:,i] # Choosing corresponding test time series
-                xxtest[:,1] = xtest[:,j]
-                
-                print(str(i)+'->'+str(j)) 
-                
-                res = nonlincausalityGRU(xx, maxlag, GRU_layers, GRU_neurons, run, Dense_layers, Dense_neurons, xxtest, z, ztest, add_Dropout, Dropout_rate, epochs_num, learning_rate, batch_size_num, verbose, plot) # creating model using only past of X, and model using past of X and Y
-                
-                VC_res = dict()
-                VC2_res = dict()
-                VCX_res = dict()
-                
-                for lag in lags: # counting change of causality for every lag
-                    modelX = res[lag][0][1] # model using only past of X
-                    modelXY = res[lag][0][2]  # model using past of X and Y
-                    
-                    X = xxtest[lag:,0] # signal, that will be forecasting
-        
-                    # test data for model based only on X (and z if set)
-                    if z!=[]:
-                        xztest= np.concatenate((ztest,xtest[:,0].reshape(xtest.shape[0],1)),axis=1)
-                        dataXtest = np.zeros([xztest.shape[0]-lag,lag,xztest.shape[1]]) # input matrix for training the model only with data from X time series
-                        for k in range(length-lag):
-                            dataXtest[k,:,:]=xztest[k:k+lag,:]    # each row is lag number of values before the value in corresponding row in X
-                    else:
-                        dataXtest = np.zeros([xtest.shape[0]-lag,lag]) # input matrix for testing the model only with data from X time series
-                        for k in range(xtest.shape[0]-lag):
-                            dataXtest[k,:]=xtest[k:k+lag,0]    # each row is lag number of values before the value in corresponding row in X
-                        dataXtest = dataXtest.reshape(dataXtest.shape[0],dataXtest.shape[1],1) # reshaping the data to meet the requirements of the model
-                    
-                    # test testing data for model based on X and Y (and z if set)
-                    if z!=[]:
-                        xztest= np.concatenate((ztest,xtest),axis=1)
-                    else:
-                        xztest=xtest
-                    dataXYtest = np.zeros([xztest.shape[0]-lag,lag,xztest.shape[1]]) # input matrix for training the model with data from X and Y time series
-                    for k in range(length-lag):
-                        dataXYtest[k,:,:] = xztest[k:k+lag,:] # in each row there is lag number of values of X and lag number of values of Y before the value in corresponding row in X
+    """
 
-                    XpredX = modelX.predict(dataXtest) # prediction of X based on past of X
-                    XpredX = XpredX.reshape(XpredX.size)
-                    errorX = X-XpredX
-                    
-                    XYpredX = modelXY.predict(dataXYtest)  # forecasting X based on the past of X and Y
-                    XYpredX = XYpredX.reshape(XYpredX.size)
-                    errorXY = X-XYpredX
-                    
-                    T = X.size
-                    VC = np.ones([int(np.ceil((T)/w2))]) # initializing variable for the causality measure
-                    VCX = np.ones([int(np.ceil((T)/w2))]) # initializing variable for numbers of samples at the end of each step
-                    all1 = False
-                    for n, k in enumerate(range(0,T,w2)): # counting value of causality starting from moment w1 with step equal to w2 till the end of time series
-                        VC[n] = 2/(1 + np.exp(-(np.sqrt(np.mean(errorX[k-w1:k]**2))/np.sqrt(np.mean(errorXY[k-w1:k]**2))-1)))-1 # value of causality as a sigmoid function of quotient of errors
-                        VCX[n] = k-w1
-                        if VC[n]<0: # if performance of modelX was better than performance of modelXY
-                            VC[n] = 0 # that means there is no causality
-                        if X[k]==X[-1]: # if the causality of the whole range of time series was calculated
-                            all1=True # there is no need for further calculations
-                    if all1==False: # otherwise calculations must be done for the end of the signal
-                        VC[-1] = 2/(1 + np.exp(-(np.sqrt(np.mean(errorX[-w1:]**2))/np.sqrt(np.mean(errorXY[-w1:]**2))-1)))-1
-                        VCX[-1] = T-w1
-                        if VC[-1]<0:
-                            VC[-1] = 0
-                    print('i = ' +str(i)+', j = '+str(j)+', lag = '+str(lag))
-                    if plot_res:
-                        plt.figure('lag '+str(lag)+' '+ str(min([i,j]))+' and ' + str(max([i,j])))
-                        plt.plot(VCX, VC)
-                        if j<i and plot_with_xtest:
-                            plt.plot(range(0,T),xxtest[lag:,0],range(0,T),xxtest[lag:,1], alpha=0.5)
-                            plt.legend([str(i)+'->'+str(j),str(j)+'->'+str(i),str(i),str(j)])
-                        elif j<i:
-                            plt.legend([str(i)+'->'+str(j),str(j)+'->'+str(i)])
+    results = run_nonlincausality_measure(
+        nonlincausalityGRU,
+        x,
+        maxlag,
+        window,
+        step,
+        GRU_layers,
+        GRU_neurons,
+        Dense_layers,
+        Dense_neurons,
+        x_test,
+        run,
+        z,
+        z_test,
+        add_Dropout,
+        Dropout_rate,
+        epochs_num,
+        learning_rate,
+        batch_size_num,
+        verbose,
+        plot,
+        plot_causality,
+        function_type="GRU",
+    )
 
-                    VCX_res[lag] = VCX    
-                    VC_res[lag] = VC
-                    VC2_res[lag] = np.log(np.var(errorX)/np.var(errorXY)) # value of causality for the whole signal
-                    
-                results[str(i)+'->'+str(j)] = ([VC_res, VC2_res, VCX_res, res],['measure of causality with sigmid function', 'measure of causality with logarithm','numbers of samples at the end of the step','results from nonlincausalityGRU function'])
+    return results
+
+
+#%% Measure MLP
+def nonlincausalitymeasureMLP(
+    x,
+    maxlag,
+    window,
+    step,
+    Dense_layers,
+    Dense_neurons,
+    x_test=[],
+    run=1,
+    z=[],
+    z_test=[],
+    add_Dropout=True,
+    Dropout_rate=0.1,
+    epochs_num=100,
+    learning_rate=0.01,
+    batch_size_num=32,
+    verbose=True,
+    plot=False,
+    plot_causality=True,
+):
+    """
+    Parameters
+    ----------
+    x : numpy.array
+        2D Array with at least 2 columns. 
+        Causality analysis will be conducted for each pair of the signals (columns)
+        E.g. if there are 2 colums containing X and Y singals the causality change over time will be calculated for both X->Y and Y->X.
+        This data is used for training the models.
+    maxlag : list, tuple, array or int
+        Collection of lags, for which the causality analysis will be conducted. 
+        Lag is a number of past values used for predictions.
+        If int then all integers from 1 to maxlag are used as lag.
+    window : int
+        Number of samples, which are taken to count RMSE in measure of causality. (former w1)
+    step : int
+        Step of the window. (former w2)
+    Dense_layers : int, optional
+        Number of Dense layers after LSTM layers. The default is 0.
+    Dense_neurons : list, optional
+        List with the numbers of neurons in each fully-connecred layer. 
+        The default is []. 
+    x_test : numpy.array, optional
+        2D Array with at least 2 columns as in x.
+        This data is used for testing the models. 
+        If it is [], then x is used for testing.
+        The default is [].
+    run : int, optional
+        The number of repetitions of the neural network training processes to obtain the network that obtains the lowest RSS value. 
+        The default is 1.
+    z : numpy.array, optional
+        2D array of the train dataset, each column is another exogenous signal for conditional causality testing.
+        The default is [].
+    z_test : numpy.array, optional
+        2D array of the test dataset, each column is another exogenous signal for conditional causality testing.
+        The default is [].
+    add_Dropout : bool, optional
+        Specifies whether dropout regularization should be applied.
+        The default is True.
+    Dropout_rate : float
+        Dropout rate - the number between 0 and 1.
+        The default is 0.1.
+    epochs_num : list or int, optional
+        Number of epochs of training the models.
+        If it is list then the consecutive elements is corresponding to the consecutive values of learning rates in learning_rate.        
+        The default is 100.
+    learning_rate : list or int, optional
+        Learning rates used in training process.
+        The default is 0.01.
+    batch_size_num : int, optional
+        Number specifies the batch size. The default is 32.
+    verbose : bool, optional
+        Specifies whether the learning process should be printed. The default is True.
+    plot : bool, optional
+        Specifies whether the predicted values along with original signals should be plotted.
+        The default is False.
+    plot_causality : bool, optional
+        Specifies whether the calculated causality change over time should be plotted. 
+        The default is True.
+
+    Returns
+    -------
+    results : dictionary
+        A dictionary whose key is the string specifying two columns of 
+        the attribute x and the direction of the causality 
+        (e.g. '0->1', or '1->0' if there are only 2 columns in x).
+        Under each key there is a list. Its first element is pandas.Series,
+        which contains values of causality change over time. 
+        Second element is the causality value for the whole singals.
+        Third element is the result of function nonlincausalityMLP.
+        
+    """
+
+    results = run_nonlincausality_measure(
+        nonlincausalityMLP,
+        x,
+        maxlag,
+        window,
+        step,
+        None,
+        None,
+        Dense_layers,
+        Dense_neurons,
+        x_test,
+        run,
+        z,
+        z_test,
+        add_Dropout,
+        Dropout_rate,
+        epochs_num,
+        learning_rate,
+        batch_size_num,
+        verbose,
+        plot,
+        plot_causality,
+        function_type="MLP",
+    )
 
     return results
 
 
 #%% Measure NN
-
-def nonlincausalitymeasureNN(x, maxlag, w1, w2, NN_config, NN_neurons, run=1, xtest=[], z=[], ztest=[], epochs_num=100, learning_rate=0.01, batch_size_num=32, verbose=True, plot=False, plot_res = True, plot_with_xtest = True):
-    
-    '''
-    This function is using modified Granger causality test to examin mutual causality in 2 or more time series.
-    It is using nonlincausalityNN function for creating prediction models.
-    A measure of causality is derived from these models asa sigmoid fuction
-    2/(1 + e^(-(RMSE1/RMSE2-1)))-1
-    Where
-    RMSE1 is root mean square error obtained from model using only past of X to predict X.
-    RMSE2 is root mean square error obtained from model using past of X and Y to predict X.
-    
-    RMSE is counted from w1 moments of time series with a step equal to w2.
-    
-    This function is counting mutual causality for every pair of time series contained in columns of x.
- 
+def nonlincausalitymeasureNN(
+    x,
+    maxlag,
+    window,
+    step,
+    NN_config,
+    NN_neurons,
+    x_test=[],
+    run=1,
+    z=[],
+    z_test=[],
+    epochs_num=100,
+    learning_rate=0.01,
+    batch_size_num=32,
+    verbose=True,
+    plot=False,
+    plot_causality=True,
+):
+    """
     Parameters
     ----------
-    x - numpy ndarray, where each column corresponds to one time series. 
-    
-    maxlag - int, list, tuple or numpy ndarray. If maxlag is int, then test for causality is made for lags from 1 to maxlag.
-    If maxlag is list, tuple or numpy ndarray, then test for causality is made for every number of lags in maxlag.
-    
-    w1 - number of samples, which are taken to count RMSE in measure of causality.
-    
-    w2 - number of sample steps for counting RMSE in measure of causality.
-    
-    NN_config - list, tuple or numpy ndarray. Specified subsequent layers of the neural network. List should contain only 'd', 'l', 'g' or 'dr':
-        'd' - Dense layer
-        'l' - LSTM layer
-        'g' - GRU layer
-        'dr' - Dropout layer
-    
-    NN_neurons - list, tuple or numpy ndarray, where the number of elements should be equal to the number of layers in NN_config. Each value corresponds to the number of neurons in layers for Danse, LSTM and GRU layer and the rate for Dropout layer.
-        E.g. if NN_config = ['l','dr','d'] and NN_neurons = [100, 0.1, 30], than first layer is LSTM layer with 100 neurons, than is Dropout layer with rate 0.1 and after it is Dense layer with 30 neurons.
-        Always last layer is Dense layer with one neuron and linear activation function. 
-    
-    xtest - numpy ndarray, where each column corresponds to one time series, as in the variable x. This data will be used for testing hypothesis. 
-    
-    z - numpy ndarray (or [] if not applied), where each column corresponds to one time series. This variable is for testing conditional causality. 
-    In this approach, the first model is forecasting the present value of X based on past values of X and z, while the second model is forecasting the same value based on the past of X, Y and z.
-    
-    ztest - numpy ndarray (or [] if not applied), where each column corresponds to one time series, as in the variable z. This data will be used for testing hypothesis. 
+    x : numpy.array
+        2D Array with at least 2 columns. 
+        Causality analysis will be conducted for each pair of the signals (columns)
+        E.g. if there are 2 colums containing X and Y singals the causality change over time will be calculated for both X->Y and Y->X.
+        This data is used for training the models.
+    maxlag : list, tuple, array or int
+        Collection of lags, for which the causality analysis will be conducted. 
+        Lag is a number of past values used for predictions.
+        If int then all integers from 1 to maxlag are used as lag.
+    window : int
+        Number of samples, which are taken to count RMSE in measure of causality. (former w1)
+    step : int
+        Step of the window. (former w2)
+    NN_config : list
+        List specifing the architecture of the neural network.
+        Each element of the list specifies one layer of the network.
+        This list should only contain:
+            'd' - fully connected (dense)
+            'g' - GRU
+            'l' - LSTM
+            'dr' - dropout
+    NN_neurons : list
+        List, that specifies the number of neurons/cells or dropout rate in each layer. 
+    x_test : numpy.array, optional
+        2D Array with 2 columns containing X and Y signals respectively. 
+        This data is used for testing the models. 
+        If it is [], then x is used for testing.
+        The default is [].
+    run : int, optional
+        The number of repetitions of the neural network training processes to obtain the network that obtains the lowest RSS value. 
+        The default is 1.
+    z : numpy.array, optional
+        2D array of the train dataset, each column is another exogenous signal for conditional causality testing.
+        The default is [].
+    z_test : numpy.array, optional
+        2D array of the test dataset, each column is another exogenous signal for conditional causality testing.
+        The default is [].
+    add_Dropout : bool, optional
+        Specifies whether dropout regularization should be applied.
+        The default is True.
+    Dropout_rate : float
+        Dropout rate - the number between 0 and 1.
+        The default is 0.1.
+    epochs_num : list or int, optional
+        Number of epochs of training the models.
+        If it is list then the consecutive elements is corresponding to the consecutive values of learning rates in learning_rate.        
+        The default is 100.
+    learning_rate : list or int, optional
+        Learning rates used in training process.
+        The default is 0.01.
+    batch_size_num : int, optional
+        Number specifies the batch size. The default is 32.
+    verbose : bool, optional
+        Specifies whether the learning process should be printed. The default is True.
+    plot : bool, optional
+        Specifies whether the predicted values along with original signals should be plotted.
+        The default is False.
+    plot_causality : bool, optional
+        Specifies whether the calculated causality change over time should be plotted. 
+        The default is True.
 
-    epochs_num -  int or list, number of epochs used for fitting the model. If list, then the length should be equal to number of different learning rates used
-    
-    learning_rate - float or list, the applied learning rate for the training process. If list, then the length should be equal to the lenth of epochs_num list.
-    
-    batch_size_num -  int, number of batch size for fitting the model.
-    
-    verbose - boolean, if True, then results are shown after each lag. 
-    
-    plot - boolean, if True plots of original and predicted values are made after each lag.
-    
-    plot_res - boolean, if True plots of results (causality measures) are made.
-    
-    plot_with_xtest - boolean, if True data from xtest are plotted on the same figure as the results. 
-    
     Returns
     -------
-    results - dictionary, where "number of one column -> number of another column" (eg. "0->1") are keys. 
-    Each key stores a list, which contains measures of causality, numbers of samples at the end of the step and results from nonlincausalityNN() function.
-    
-    '''
-    
-    # Checking the data correctness
-    if type(x) is np.ndarray:
-        if np.array(x.shape).shape[0] !=2:
-            raise Exception('x has wrong shape.')
-        elif x.shape[1] == 1:
-            raise Exception('x should have at least 2 columns.')
-        elif True in np.isnan(x):
-            raise ValueError('There is some NaN in x.')
-        elif True in np.isinf(x):
-            raise ValueError('There is some infinity value in x.')
-    else:
-        raise TypeError('x should be numpy ndarray.')
-    
-    # Checking if maxlag has correct type and values
-    if type(maxlag) is list or type(maxlag) is np.ndarray or type(maxlag) is tuple:
-        lags = maxlag
-        for lag in lags:
-            if type(lag) is not int:
-                raise ValueError('Every element in maxlag should be an integer.')
-            elif lag<=0:
-                raise ValueError('Every element in maxlag should be a positive integer.')
-    elif type(maxlag) is int:
-        if maxlag>0:
-            lags = range(1,maxlag+1)
-        else:
-            raise ValueError('maxlag should be grater than 0.')
-    else:
-        raise TypeError('maxlag should be int, list, tuple or numpy ndarray.')
-    
-    # Checking the test data correctness
-    if type(xtest) is np.ndarray:
-        if xtest.shape[1] !=x.shape[1]:
-            raise Exception('xtest should have the same number of columns as x.')
-        elif True in np.isnan(xtest):
-            raise ValueError('There is some NaN in xtest.')
-        elif True in np.isinf(xtest):
-            raise ValueError('There is some infinity value in xtest.')
-    elif xtest==[]:
-        xtest=x
-    else:
-        raise TypeError('xtest should be numpy ndarray, or [].')  
+    results : dictionary
+        A dictionary whose key is the string specifying two columns of 
+        the attribute x and the direction of the causality 
+        (e.g. '0->1', or '1->0' if there are only 2 columns in x).
+        Under each key there is a list. Its first element is pandas.Series,
+        which contains values of causality change over time. 
+        Second element is the causality value for the whole singals.
+        Third element is the result of function nonlincausalityNN.
         
-    xx = np.zeros([x.shape[0],2])
-    xxtest = np.zeros([xtest.shape[0],2])
-    results = dict()
-    length = xtest.shape[0]
-    
-    for i in range(x.shape[1]):
-        for j in range(x.shape[1]):
-            if i==j:
-                continue
+    """
+
+    results = run_nonlincausality_measure(
+        nonlincausalityNN,
+        x,
+        maxlag,
+        window,
+        step,
+        NN_config,
+        NN_neurons,
+        None,
+        None,
+        x_test,
+        run,
+        z,
+        z_test,
+        None,
+        None,
+        epochs_num,
+        learning_rate,
+        batch_size_num,
+        verbose,
+        plot,
+        plot_causality,
+        function_type="NN",
+    )
+
+    return results
+
+
+#%% Measure ARIMA
+def nonlincausalitymeasureARIMA(
+    x, maxlag, window, step, x_test=[], z=[], z_test=[], plot=False, plot_causality=True
+):
+    """
+    Parameters
+    ----------
+    x : numpy.array
+        2D Array with at least 2 columns. 
+        Causality analysis will be conducted for each pair of the signals (columns)
+        E.g. if there are 2 colums containing X and Y singals the causality change over time will be calculated for both X->Y and Y->X.
+        This data is used for training the models.
+    maxlag : list, tuple, array or int
+        Collection of lags, for which the causality analysis will be conducted. 
+        Lag is a number of past values used for predictions.
+        If int then all integers from 1 to maxlag are used as lag.
+    window : int
+        Number of samples, which are taken to count RMSE in measure of causality. (former w1)
+    step : int
+        Step of the window. (former w2)
+    x_test : numpy.array, optional
+        2D Array with 2 columns containing X and Y signals respectively. 
+        This data is used for testing the models. 
+        If it is [], then x is used for testing.
+        The default is [].
+    z : numpy.array, optional
+        2D array of the train dataset, each column is another exogenous signal for conditional causality testing.
+        The default is [].
+    z_test : numpy.array, optional
+        2D array of the test dataset, each column is another exogenous signal for conditional causality testing.
+        The default is [].
+    plot : bool, optional
+        Specifies whether the predicted values along with original signals should be plotted.
+        The default is False.
+    plot_causality : bool, optional
+        Specifies whether the calculated causality change over time should be plotted. 
+        The default is True.
+
+    Returns
+    -------
+    results : dictionary
+        A dictionary whose key is the string specifying two columns of 
+        the attribute x and the direction of the causality 
+        (e.g. '0->1', or '1->0' if there are only 2 columns in x).
+        Under each key there is a list. Its first element is pandas.Series,
+        which contains values of causality change over time. 
+        Second element is the causality value for the whole singals.
+        Third element is the result of function nonlincausalityARIMA.
+
+    """
+    # Checking the correctness of the input arguments
+    check_input_measure(window, step)
+
+    # If maxlag is int the test is made for every integer from 1 to maxlag
+    if isinstance(maxlag, int):
+        lags = range(1, maxlag + 1)
+    else:
+        lags = maxlag
+        
+    x_currently_analized = np.zeros([x.shape[0], 2])
+    x_test_currently_analized = np.zeros([x_test.shape[0], 2])
+    results = {}
+    length = x_test.shape[0]
+
+    # In terms of testing Y->X, this loop is responsible for choosing X
+    for signal_1 in range(x.shape[1]):
+        # This one is responsible for choosing Y
+        for signal_2 in range(x.shape[1]):
+            if signal_1 == signal_2:
+                continue  # not to calculate causality for X->X
             else:
-                xx[:,0] = x[:,i]    # Choosing time series, which will be examin in this iteration
-                xx[:,1] = x[:,j]
-                
-                xxtest[:,0] = xtest[:,i] # Choosing corresponding test time series
-                xxtest[:,1] = xtest[:,j]
-                
-                print(str(j)+'->'+str(i)) 
-                
-                res = nonlincausalityNN(xx, maxlag, NN_config, NN_neurons, run, xxtest, z, ztest, epochs_num, learning_rate, batch_size_num, verbose, plot)
-                
-                VC_res = dict()
-                VC2_res = dict()
-                VCX_res = dict()
-                
+                # Choosing time series, which will be examin in this iteration
+                x_currently_analized[:, 0] = x[:, signal_1]
+                x_currently_analized[:, 1] = x[:, signal_2]
+
+                # Choosing corresponding test time series
+                x_test_currently_analized[:, 0] = x_test[:, signal_1]
+                x_test_currently_analized[:, 1] = x_test[:, signal_2]
+
+                print(str(signal_1) + "->" + str(signal_2))
+
+                results_idx = nonlincausalityARIMA(x, maxlag, x_test, z, z_test, plot)
+
+                # Value of the change of causality over time
+                causality_values_lags = {}
+                # Value of the causality for the whole signals
+                causality_all_lags = {}
+
+                # Calculating the change of causality over time for every lag
                 for lag in lags:
-                    idx_bestX = res[lag][0][-4]
-                    idx_bestXY = res[lag][0][-3]
-                    modelsX = res[lag][0][1]
-                    modelsXY = res[lag][0][2]
-                    modelX = modelsX[idx_bestX]
-                    modelXY = modelsXY[idx_bestXY]
-                    
-                    X = xxtest[lag:,0] # signal, that will be forecasting
-        
-                    # test data for model based only on X (and z if set)
-                    if z!=[]:
-                        xztest= np.concatenate((ztest,xxtest[:,0].reshape(xxtest.shape[0],1)),axis=1)
-                        dataXtest = np.zeros([xztest.shape[0]-lag,lag,xztest.shape[1]]) # input matrix for training the model only with data from X time series
-                        for k in range(length-lag):
-                            dataXtest[k,:,:]=xztest[k:k+lag,:]    # each row is lag number of values before the value in corresponding row in X
+                    # Signal, that will be forecasting
+                    X_test = x_test_currently_analized[lag:, 0]
+
+                    XpredX = results_idx[lag].best_model_X.predict(typ="levels")
+                    XYpredX = results_idx[lag].best_model_XY.predict(typ="levels")
+
+                    if len(z) > 0:
+                        error_X = X_test[lag - 1 :] - XpredX[lag:]
                     else:
-                        dataXtest = np.zeros([xxtest.shape[0]-lag,lag]) # input matrix for testing the model only with data from X time series
-                        for k in range(xxtest.shape[0]-lag):
-                            dataXtest[k,:]=xxtest[k:k+lag,0]    # each row is lag number of values before the value in corresponding row in X
-                        dataXtest = dataXtest.reshape(dataXtest.shape[0],dataXtest.shape[1],1) # reshaping the data to meet the requirements of the model
-                    
-                    # test testing data for model based on X and Y (and z if set)
-                    if z!=[]:
-                        xztest= np.concatenate((ztest,xxtest),axis=1)
-                        dataXYtest = np.zeros([xztest.shape[0]-lag,lag,xztest.shape[1]]) # input matrix for training the model with data from X and Y time series
-                        for k in range(length-lag):
-                            dataXYtest[k,:,:]=xztest[k:k+lag,:]    # each row is lag number of values before the value in corresponding row in X
-                    else:
-                        dataXYtest = np.zeros([xxtest.shape[0]-lag,lag,2]) # input matrix for testing the model with data from X and Y time series
-                        for k in range(xxtest.shape[0]-lag):
-                            dataXYtest[k,:,:]=xxtest[k:k+lag,:]    # each row is lag number of values before the value in corresponding row in X
-                        #dataXYtest = dataXYtest.reshape(dataXYtest.shape[0],dataXYtest.shape[1],2) # reshaping the data to meet the requirements of the model
-                    
-                    XpredX = modelX.predict(dataXtest) # prediction of X based on past of X
-                    XpredX = XpredX.reshape(XpredX.size)
-                    errorX = X-XpredX
-                    
-                    XYpredX = modelXY.predict(dataXYtest)  # forecasting X based on the past of X and Y
-                    XYpredX = XYpredX.reshape(XYpredX.size)
-                    errorXY = X-XYpredX
+                        error_X = X_test[lag - 1 :] - XpredX[2 * lag - 1 :]
+                    error_XY = X_test[lag - 1 :] - XYpredX[lag:]
 
-                    T = X.size
-                    VC = np.ones([int(np.ceil((T)/w2))]) # initializing variable for the causality measure
-                    VCX = np.ones([int(np.ceil((T)/w2))]) # initializing variable for numbers of samples at the end of each step
-                    all1 = False
-                    for n, k in enumerate(range(0,T,w2)): # counting value of causality starting from moment w1 with step equal to w2 till the end of time series
-                        VC[n] = 2/(1 + np.exp(-(np.sqrt(np.mean(errorX[k-w1:k]**2))/np.sqrt(np.mean(errorXY[k-w1:k]**2))-1)))-1 # value of causality as a sigmoid function of quotient of errors
-                        VCX[n] = k-w1
-                        if VC[n]<0: # if performance of modelX was better than performance of modelXY
-                            VC[n] = 0 # that means there is no causality
-                        if X[k]==X[-1]: # if the causality of the whole range of time series was calculated
-                            all1=True # there is no need for further calculations
-                    if all1==False: # otherwise calculations must be done for the end of the signal
-                        VC[-1] = 2/(1 + np.exp(-(np.sqrt(np.mean(errorX[-w1:]**2))/np.sqrt(np.mean(errorXY[-w1:]**2))-1)))-1
-                        VCX[-1] = T-w1
-                        if VC[-1]<0:
-                            VC[-1] = 0
-                    print('i = ' +str(i)+', j = '+str(j)+', lag = '+str(lag))
-                    if plot_res:
-                        plt.figure('lag '+str(lag)+' '+ str(min([i,j]))+' and ' + str(max([i,j])))
-                        plt.plot(VCX, VC)
-                        if j<i and plot_with_xtest:
-                            plt.plot(range(0,T),xxtest[lag:,0],range(0,T),xxtest[lag:,1], alpha=0.5)
-                            plt.legend([str(i)+'->'+str(j),str(j)+'->'+str(i),str(i),str(j)])
-                        elif j<i:
-                            plt.legend([str(i)+'->'+str(j),str(j)+'->'+str(i)])
+                    causality_values = calculate_causality_over_time(
+                        error_X, error_XY, window, step, lag
+                    )
 
-                    VCX_res[lag] = VCX    
-                    VC_res[lag] = VC
-                    VC2_res[lag] = np.log(np.var(errorX)/np.var(errorXY)) # value of causality for the whole signal
-                    
-                results[str(j)+'->'+str(i)] = ([VC_res, VC2_res, VCX_res, res],['measure of causality with sigmid function', 'measure of causality with logarithm','numbers of samples at the end of the step','results from nonlincausalityNN function'])
-           
+                    # Plotting the change of causality over time
+                    if plot_causality:
+                        if signal_1 < signal_2:
+                            lines = plot_causality_over_time_part1(
+                                signal_1,
+                                signal_2,
+                                lag,
+                                length - lag + 1,
+                                x_test_currently_analized[lag - 1 :, :],
+                                causality_values,
+                            )
+                        else:
+                            plot_causality_over_time_part2(
+                                signal_1, signal_2, lag, causality_values, lines
+                            )
+                    causality_values_lags[lag] = causality_values
+
+                    causality_all_lags[lag] = calculate_causality(error_X, error_XY)
+                # Values of the change of causality over time, value of causality of the whole signals, results from the causality analysis
+                results[str(signal_1) + "->" + str(signal_2)] = (
+                    causality_values_lags,
+                    causality_all_lags,
+                    results_idx,
+                )
+                
     return results
-    
-#%% Measure ARIMAX
 
-def nonlincausalitymeasureARIMAX(x, maxlag, w1, w2, d, xtest=[], z=[], ztest=[], verbose=True, plot = False, plot_res = False, plot_with_x = False):
-    
-    '''
-    This function is using a modified Granger causality test to examine mutual causality in 2 or more time series.
-    It is using nonlincausalityARIMAX function for creating prediction models.
-    A measure of causality is derived from these models as a sigmoid function
-    2/(1 + e^(-(RMSE1/RMSE2-1)))-1
-    Where
-    RMSE1 is the root mean square error obtained from the model using only the past of X to predict X.
-    RMSE2 is the root mean square error obtained from the model using the past of X and Y to predict X.
-    
-    RMSE is counted from w1 moments of time series with a step equal to w2.
-    
-    This function is counting mutual causality for every pair of time series contained in columns of x.
 
-    Parameters
-    ----------
-    x - numpy ndarray, where each column corresponds to one time series. 
-    
-    maxlag - int, list, tuple or numpy ndarray. If maxlag is int, then test for causality is made for lags from 1 to maxlag.
-    If maxlag is list, tuple or numpy ndarray, then test for causality is made for every number of lags in maxlag.
-    
-    w1 - number of samples, which are taken to count RMSE in measure of causality.
-    
-    w2 - number of sample steps for counting RMSE in measure of causality.
-    
-    z - numpy ndarray (or [] if not applied), where each column corresponds to one time series. This variable is for testing conditional causality. 
-    In this approach, the first model is forecasting the present value of X based on past values of X and z, while the second model is forecasting the same value based on the past of X, Y and z.
-
-    verbose - boolean, if True, then results are shown after each lag. 
-    
-    plot - boolean, if True plots of original and predicted values are made after each lag.
-    
-    plot_res - boolean, if True plots of results (causality measures) are made.
-    
-    plot_with_x - boolean, if True data from x are plotted on the same figure as the results. 
-    
-    Returns
-    -------
-    results - dictionary, where "number of one column -> number of another column" (eg. "0->1") are keys. 
-    Each key stores a list, which contains measures of causality, numbers of samples at the end of the step and results from nonlincausalityARIMAX() function.
-    
-    '''
-    
-    # Checking the data correctness
-    if type(x) is np.ndarray:
-        if np.array(x.shape).shape[0] !=2:
-            raise Exception('x has wrong shape.')
-        elif x.shape[1] == 1:
-            raise Exception('x should have at least 2 columns.')
-        elif True in np.isnan(x):
-            raise ValueError('There is some NaN in x.')
-        elif True in np.isinf(x):
-            raise ValueError('There is some infinity value in x.')
-    else:
-        raise TypeError('x should be numpy ndarray.')
-    
-    # Checking if maxlag has correct type and values
-    if type(maxlag) is list or type(maxlag) is np.ndarray or type(maxlag) is tuple:
-        lags = maxlag
-        for lag in lags:
-            if type(lag) is not int:
-                raise ValueError('Every element in maxlag should be an integer.')
-            elif lag<=0:
-                raise ValueError('Every element in maxlag should be a positive integer.')
-    elif type(maxlag) is int:
-        if maxlag>0:
-            lags = range(1,maxlag+1)
-        else:
-            raise ValueError('maxlag should be grater than 0.')
-    else:
-        raise TypeError('maxlag should be int, list, tuple or numpy ndarray.')
+#%% Plot training history
+def plot_history_loss(history_X, history_XY):
+    hist_X = []
+    hist_XY = []
+    for idx in range(len(history_X)):
+        hist_X += [hist for hist in history_X[idx].history["mse"]]
+        hist_XY += [hist for hist in history_XY[idx].history["mse"]]
         
-    xx = np.zeros([x.shape[0],2])
-    results = dict()
-
-    for i in range(x.shape[1]): # In terms of testing Y->X, this loop is responsible for choosing Y
-        for j in range(x.shape[1]): # This one is responsible for choosing X
-            if i==j:
-                continue # not to calculate causality for X->X
-            else:
-                xx[:,0] = x[:,i]    # Choosing time series, which will be examin in this iteration
-                xx[:,1] = x[:,j]
-                
-                print(str(i)+'->'+str(j)) 
-                
-                res = nonlincausalityARIMAX(xx, maxlag, d, xtest, z, ztest, plot) # creating model using only past of X, and model using past of X and Y
-                
-                VC_res = dict()
-                VC2_res = dict()
-                VCX_res = dict()
-                
-                for lag in lags: # counting change of causality for every lag
-                    modelX = res[lag][0][1] # model using only past of X
-                    modelXY = res[lag][0][2]  # model using past of X and Y
-                    
-                    X = xx[:,0]
-                    
-                    XpredX = modelX.predict(typ='levels') # predicted values
-                    XYpredX = modelXY.predict(typ='levels')
-                                        
-                    errorX = X[1:]-XpredX
-                    errorXY = X[1:]-XYpredX
-                    
-                    T = X.size
-                    VC = np.ones([int(np.ceil((T)/w2))]) # initializing variable for the causality measure
-                    VCX = np.ones([int(np.ceil((T)/w2))]) # initializing variable for numbers of samples at the end of each step
-                    all1 = False
-                    for n, k in enumerate(range(w1,T,w2)): # counting value of causality starting from moment w1 with step equal to w2 till the end of time series
-                        VC[n] = 2/(1 + math.exp(-(math.sqrt(statistics.mean(errorX[k-w1:k]**2))/math.sqrt(statistics.mean(errorXY[k-w1:k]**2))-1)))-1 # value of causality as a sigmoid function of quotient of errors
-                        VCX[n] = k
-                        if VC[n]<0: # if performance of modelX was better than performance of modelXY
-                            VC[n] = 0 # that means there is no causality
-                        if X[k]==X[-1]: # if the causality of the whole range of time series was calculated
-                            all1=True # there is no need for further calculations
-                    if all1==False: # otherwise calculations must be done for the end of the signal
-                        VC[-1] = 2/(1 + math.exp(-(math.sqrt(statistics.mean(errorX[-w1:]**2))/math.sqrt(statistics.mean(errorXY[-w1:]**2))-1)))-1
-                        VCX[-1] = T
-                        if VC[-1]<0:
-                            VC[-1] = 0
-                    print('i = ' +str(i)+', j = '+str(j)+', lag = '+str(lag))
-                    if plot_res:
-                        plt.figure('lag '+str(lag)+'_'+ str(min([i,j]))+' and ' + str(max([i,j])) +' sigmoid function of quotient of errors')
-                        plt.plot(VCX, VC)
-                        if j<i and plot_with_x:
-                            plt.plot(range(0,T),xx[0:,0],range(0,T),xx[0:,1])
-                            plt.legend([str(i)+'->'+str(j),str(j)+'->'+str(i),str(i),str(j)])
-                        elif j<i:
-                            plt.legend([str(i)+'->'+str(j),str(j)+'->'+str(i)])
-                    
-                    VCX_res[lag] = VCX
-                    VC_res[lag] = VC
-                    VC2_res[lag] = math.log(statistics.variance(errorX)/statistics.variance(errorXY)) # value of causality for the whole signal
-                    
-                results[str(i)+'->'+str(j)] = ([VC_res, VC2_res, VCX, res],['measure of causality with sigmid function', 'measure of causality with logarithm','numbers of samples at the end of the step','results from nonlincausalityARIMAX function'])
-                    
-    return results
+    plt.figure()
+    plt.plot(hist_X)
+    plt.plot(hist_XY)
+    plt.xlabel("Number of epoch")
+    plt.ylabel("Loss (MSE)")

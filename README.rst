@@ -19,10 +19,8 @@ Those functions are using first type functions to create the forecasting models.
 They calculate the measure of the causality in a given time window (`w1`) with a given step (`w2`).
 The measure of change of the causality over time is expressed by the equation:
 
-.. math::
-
-	\frac{F(Y➔X) =  - 2/(1 + exp(-((RMSE_X/RMSE_{XY})-1)))-1}
-
+:math:`F(Y➔X) =  - 2/(1 + exp(-((RMSE_X/RMSE_{XY})-1)))-1`
+	
 
 Those functions can operate with multiple time series and test causal relations for each pair of signals.
 The second type of function contains: `nonlincausalitymeasureMLP()`, `nonlincausalitymeasureLSTM()`, `nonlincausalitymeasureGRU()`, `nonlincausalitymeasureNN()` and `nonlincausalitymeasureARIMA()`.

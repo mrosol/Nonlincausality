@@ -10,7 +10,7 @@ contact: mrosol5@gmail.com
 import setuptools
 
 
-with open('README.rst') as f:
+with open('README.md') as f:
     README = f.read()
 
 setuptools.setup(
@@ -21,6 +21,7 @@ setuptools.setup(
     description='Python package for Granger causality test with nonlinear (neural networks) forecasting methods.',
     version='v1.1.1',
     long_description=README,
+    long_description_content_type='text/markdown',
     url='https://github.com/mrosol/Nonlincausality',
     packages=setuptools.find_packages(),
     python_requires=">=3.6",

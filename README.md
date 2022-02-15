@@ -15,11 +15,8 @@ The functions based on neural networks can test the causality on the given test 
 The second type of functions is for measuring the change of causality over time.
 Those functions are using first type functions to create the forecasting models.
 They calculate the measure of the causality in a given time window (`w1`) with a given step (`w2`).
-The measure of change of the causality over time is expressed by the equation:
+The measure of change of the causality over time is expressed by the equation presented in the article refered below.
 
-$$
-\ F(Y➔X) =  - 2/(1 + exp(-((RMSE_X/RMSE_{XY})-1)))-1 
-$$
 
 Those functions can operate with multiple time series and test causal relations for each pair of signals.
 The second type of function contains: `nonlincausalitymeasureMLP()`, `nonlincausalitymeasureLSTM()`, `nonlincausalitymeasureGRU()`, `nonlincausalitymeasureNN()` and `nonlincausalitymeasureARIMA()`.
@@ -45,26 +42,26 @@ results = nonlincausalityMLP(x=data_train, maxlag=lags, Dense_layers=2, Dense_ne
 ```
 
 ### GRU
-```python
+```
 results_GRU = nonlincausalityGRU(x=data_train, maxlag=lags, GRU_layers=2, GRU_neurons=[25, 25], Dense_layers=2, Dense_neurons=[100, 100], x_test=data_test, run=3, add_Dropout=True, Dropout_rate=0.01, epochs_num=[50, 100], learning_rate=[0.001, 0.0001], batch_size_num=128, verbose=False, plot=True)
 ```
 
 ### LSTM
-```python
+```
 results_LSTM = nonlincausalityLSTM(x=data_train, maxlag=lags, LSTM_layers=2, LSTM_neurons=[25, 25], Dense_layers=2, Dense_neurons=[100, 100], x_test=data_test, run=3, add_Dropout=True, Dropout_rate=0.01, epochs_num=[50, 100], learning_rate=[0.001, 0.0001], batch_size_num=128, verbose=False, plot=True)
 ```
 
 ### NN
-```python
+```
 results_NN = nonlincausalityNN(x=data_train, maxlag=lags, NN_config=["l", "dr", "g", "dr", "d", "dr"], NN_neurons=[5, 0.1, 5, 0.1, 5, 0.1], x_test=data_test, run=3, epochs_num=[50, 100], learning_rate=[0.001, 0.0001], batch_size_num=128, verbose=False, plot=True)
 ```
 ### ARIMA
-```python
+```
 results_ARIMA = nonlincausalityARIMA(x=data_train, maxlag=lags, x_test=data_train)
 ```
 ### Change of causality over time
 For a deeper understanding of the dependency between the signals, the change of causality over time might be studied using the above-mentioned functions. The example usage for MLP neural networks:
-```python
+```
 results = nlc.nonlincausalitymeasureMLP(x=data_train, maxlag=lags, window=100, step=1, Dense_layers=2, Dense_neurons=[100, 100], x_test=data_test, run=5, add_Dropout=True, Dropout_rate=0.01, epochs_num=[50, 100], learning_rate=[0.001, 0.0001], batch_size_num=128, verbose=False, plot=True)
 ```
 ### Conditional causality

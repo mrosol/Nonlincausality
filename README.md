@@ -18,6 +18,7 @@ They calculate the measure of the causality in a given time window (`w1`) with a
 The measure of change of the causality over time is expressed by the equation:
 
 ![Equation 1](https://latex.codecogs.com/gif.latex?F%28Y%5Crightarrow%20X%29%20%3D%20-%20%5Cfrac%7B2%7D%7B1%20&plus;%20%5Cexp%5E%7B-%5Cfrac%7BRMSE_X%7D%7BRMSE_%7BXY%7D%7D&plus;1%7D%7D-1)
+
 Those functions can operate with multiple time series and test causal relations for each pair of signals.
 The second type of function contains: `nonlincausalitymeasureMLP()`, `nonlincausalitymeasureLSTM()`, `nonlincausalitymeasureGRU()`, `nonlincausalitymeasureNN()` and `nonlincausalitymeasureARIMA()`.
 

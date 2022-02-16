@@ -24,17 +24,13 @@ The second type of function contains: `nonlincausalitymeasureMLP()`, `nonlincaus
 
 ## Author
 **Maciej Rosoł**
-mrosol5@gmail.com, maciej.rosol.dokt@pw.edu.pl
-
+mrosol5@gmail.com, maciej.rosol.dokt@pw.edu.pl <br />
 Warsaw University of Technology
 
 ## Reference 
-Maciej Rosoł, Marcel Młyńczak, Gerard Cybulski
-
-Granger causality test with nonlinear neural-network-based methods: Python package and simulation study.,
-
-Computer Methods and Programs in Biomedicine, Volume 216, 2022
-
+Maciej Rosoł, Marcel Młyńczak, Gerard Cybulski <br />
+Granger causality test with nonlinear neural-network-based methods: Python package and simulation study. <br />
+Computer Methods and Programs in Biomedicine, Volume 216, 2022 <br />
 https://doi.org/10.1016/j.cmpb.2022.106669
 
 ## Example usage

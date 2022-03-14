@@ -12,8 +12,8 @@ Granger causality test with nonlinear neural-network-based methods: Python packa
 Computer Methods and Programs in Biomedicine, Volume 216, 2022
 https://doi.org/10.1016/j.cmpb.2022.106669
 
-Version 1.1.1
-Update: 13.02.2022
+Version 1.1.3
+Update: 14.03.2022
 """
 
 import numpy as np
@@ -25,7 +25,7 @@ from keras.models import Model
 from statsmodels.tsa.arima.model import ARIMA
 from statsmodels.tsa.tsatools import lagmat2ds
 
-from utils import (
+from nonlincausality.utils import (
     check_input,
     check_input_measure,
     prepare_data,
@@ -36,7 +36,7 @@ from utils import (
     plot_causality_over_time_part1,
     plot_causality_over_time_part2
 )
-from results import ResultsNonlincausality
+from nonlincausality.results import ResultsNonlincausality
 
 
 #%% Inside of the nonlincausality functions

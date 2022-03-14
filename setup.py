@@ -3,7 +3,7 @@
 Created on Sat Sep  5 22:52:23 2020
 
 @author: MSc. Maciej Rosoł
-contact: mrosol5@gmail.com
+contact: mrosol5@gmail.com, maciej.rosol.dokt@pw.edu.pl
 """
 
 
@@ -19,7 +19,7 @@ setuptools.setup(
     name='nonlincausality',
     license="MIT",
     description='Python package for Granger causality test with nonlinear (neural networks) forecasting methods.',
-    version='v1.1.1',
+    version='v1.1.3',
     long_description=README,
     long_description_content_type='text/markdown',
     url='https://github.com/mrosol/Nonlincausality',

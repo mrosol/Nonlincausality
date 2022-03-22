@@ -12,16 +12,16 @@ Granger causality test with nonlinear neural-network-based methods: Python packa
 Computer Methods and Programs in Biomedicine, Volume 216, 2022
 https://doi.org/10.1016/j.cmpb.2022.106669
 
-Version 1.1.3
-Update: 14.03.2022
+Version 1.1.4
+Update: 22.03.2022
 """
 
 import numpy as np
 import matplotlib.pyplot as plt
 import scipy.stats as stats
-import keras
-from keras.layers import Dense, LSTM, Dropout, GRU, TimeDistributed, Flatten, Input
-from keras.models import Model
+from tensorflow import keras
+from tensorflow.keras.layers import Dense, LSTM, Dropout, GRU, TimeDistributed, Flatten, Input
+from tensorflow.keras.models import Model
 from statsmodels.tsa.arima.model import ARIMA
 from statsmodels.tsa.tsatools import lagmat2ds
 

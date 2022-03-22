@@ -19,13 +19,13 @@ setuptools.setup(
     name='nonlincausality',
     license="MIT",
     description='Python package for Granger causality test with nonlinear (neural networks) forecasting methods.',
-    version='v1.1.3',
+    version='v1.1.4',
     long_description=README,
     long_description_content_type='text/markdown',
     url='https://github.com/mrosol/Nonlincausality',
     packages=setuptools.find_packages(),
     python_requires=">=3.6",
-    install_requires=['numpy', 'pandas','scipy', 'keras', 'statsmodels', 'tensorflow', 'matplotlib'],
+    install_requires=['numpy', 'pandas','scipy', 'statsmodels', 'tensorflow', 'matplotlib'],
     keywords='Granger causality neural networks nonlinear forecasting signals',
     classifiers=[
         # Trove classifiers

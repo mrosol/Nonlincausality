@@ -12,7 +12,7 @@ Granger causality test with nonlinear neural-network-based methods: Python packa
 Computer Methods and Programs in Biomedicine, Volume 216, 2022
 https://doi.org/10.1016/j.cmpb.2022.106669
 
-Version 1.1.7
+Version 1.1.8
 Update: 14.09.2022
 """
 
@@ -902,7 +902,7 @@ def NN_architecture(NN_config, NN_neurons, data_shape, regularization, reg_alpha
                 input_layer
             )
         else:
-            layers_nn = Dense(NN_neurons[0], activation="relu")(input_layer)
+            layers_nn = Dense(NN_neurons[0], activation="relu", kernel_regularizer=kernel_reg)(input_layer)
     elif NN_config[0] == "g":  # Adding GRU layer
         layers_nn = GRU(
             NN_neurons[0],

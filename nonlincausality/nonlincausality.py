@@ -12,8 +12,8 @@ Granger causality test with nonlinear neural-network-based methods: Python packa
 Computer Methods and Programs in Biomedicine, Volume 216, 2022
 https://doi.org/10.1016/j.cmpb.2022.106669
 
-Version 1.1.5
-Update: 22.03.2022
+Version 1.1.6
+Update: 14.09.2022
 """
 
 import numpy as np
@@ -59,6 +59,9 @@ def run_nonlincausality(
     epochs_num,
     learning_rate,
     batch_size_num,
+    regularization,
+    reg_alpha,
+    callbacks,
     verbose,
     plot,
     functin_type,
@@ -116,6 +119,12 @@ def run_nonlincausality(
         The default is 0.01.
     batch_size_num : int
         Number specifies the batch size. The default is 32.
+    regularization : str, optional
+        Name of the regularization technique to be used 'l1'/'l2'/'l1_l2'
+    reg_alpha : float or list, optional
+        regularization parameter of list of parameters if l1_l2 is used
+    callbacks : list, optional
+        List of Keras callback to be used during fitting
     verbose : bool
         Specifies whether the learning process should be printed. The default is True.
     plot : bool
@@ -225,10 +234,10 @@ def run_nonlincausality(
                 )
             else:
                 model_X = network_architecture(
-                    Network_layers, Network_neurons, data_X.shape
+                    Network_layers, Network_neurons, data_X.shape, regularization, reg_alpha
                 )
                 model_XY = network_architecture(
-                    Network_layers, Network_neurons, data_XY.shape
+                    Network_layers, Network_neurons, data_XY.shape, regularization, reg_alpha
                 )
             # Training models for specified number of epochs and learning rate
             for i, e in enumerate(epochs_num):
@@ -238,7 +247,7 @@ def run_nonlincausality(
                 )
                 history_X.append(
                     model_X.fit(
-                        data_X, X, epochs=e, batch_size=batch_size_num, verbose=verbose
+                        data_X, X, epochs=e, batch_size=batch_size_num, verbose=verbose, callbacks=callbacks
                     )
                 )
 
@@ -248,7 +257,7 @@ def run_nonlincausality(
 
                 history_XY.append(
                     model_XY.fit(
-                        data_XY, X, epochs=e, batch_size=batch_size_num, verbose=verbose
+                        data_XY, X, epochs=e, batch_size=batch_size_num, verbose=verbose, callbacks=callbacks
                     )
                 )
             # Calculating predictions and errors for both models
@@ -851,7 +860,7 @@ def check_if_seq(NN_config):
     return return_seq
 
 
-def NN_architecture(NN_config, NN_neurons, data_shape):
+def NN_architecture(NN_config, NN_neurons, data_shape, regularization, reg_alpha):
     """
     Parameters
     ----------
@@ -861,6 +870,10 @@ def NN_architecture(NN_config, NN_neurons, data_shape):
         List, that specifies the number of neurons/cells or dropout rate in each layer.
     data_shape : tuple
         Shape of the training data.
+    regularization : str, optional
+        Name of the regularization technique to be used 'l1'/'l2'/'l1_l2'
+    reg_alpha : float or list, optional
+        regularization parameter of list of parameters if l1_l2 is used
 
     Returns
     -------
@@ -868,6 +881,14 @@ def NN_architecture(NN_config, NN_neurons, data_shape):
         Model with the specified architecture.
 
     """
+    if regularization=='l2':
+        kernel_reg = keras.regularizers.l2(reg_alpha)
+    elif regularization=='l1':
+        kernel_reg = keras.regularizers.l1(reg_alpha)
+    elif regularization=='l1_l2':
+        kernel_reg = keras.regularizers.l1_l2(reg_alpha[0],reg_alpha[1])
+    else:
+        kernel_reg = None
     # data_shape[1] - lag, data_shape[2] - number of signals
     input_layer = Input((data_shape[1], data_shape[2]))
 
@@ -889,6 +910,7 @@ def NN_architecture(NN_config, NN_neurons, data_shape):
             recurrent_activation="tanh",
             use_bias=True,
             return_sequences=return_seq,
+            kernel_regularizer=kernel_reg,
         )(input_layer)
     elif NN_config[0] == "l":  # Adding LSTM layer
         layers_nn = LSTM(
@@ -897,6 +919,7 @@ def NN_architecture(NN_config, NN_neurons, data_shape):
             recurrent_activation="tanh",
             use_bias=True,
             return_sequences=return_seq,
+            kernel_regularizer=kernel_reg,
         )(input_layer)
         
     # Adding rest layers
@@ -907,10 +930,10 @@ def NN_architecture(NN_config, NN_neurons, data_shape):
             # If one of the next layers is LSTM or GRU
             if return_seq:
                 layers_nn = TimeDistributed(
-                    Dense(NN_neurons[idx + 1], activation="relu")
+                    Dense(NN_neurons[idx + 1], activation="relu", kernel_regularizer=kernel_reg)
                 )(layers_nn)
             else:
-                layers_nn = Dense(NN_neurons[idx + 1], activation="relu")(layers_nn)
+                layers_nn = Dense(NN_neurons[idx + 1], activation="relu", kernel_regularizer=kernel_reg)(layers_nn)
         elif n == "g":  # Adding GRU layer
             layers_nn = GRU(
                 NN_neurons[idx + 1],
@@ -918,6 +941,7 @@ def NN_architecture(NN_config, NN_neurons, data_shape):
                 recurrent_activation="tanh",
                 use_bias=True,
                 return_sequences=return_seq,
+                kernel_regularizer=kernel_reg,
             )(layers_nn)
         elif n == "l":  # Adding LSTM layer
             layers_nn = LSTM(
@@ -926,6 +950,7 @@ def NN_architecture(NN_config, NN_neurons, data_shape):
                 recurrent_activation="tanh",
                 use_bias=True,
                 return_sequences=return_seq,
+                kernel_regularizer=kernel_reg,
             )(layers_nn)
         elif n == "dr":  # Adding dropout
             layers_nn = Dropout(NN_neurons[idx + 1])(layers_nn)
@@ -934,7 +959,7 @@ def NN_architecture(NN_config, NN_neurons, data_shape):
     if not "g" in NN_config and not "l" in NN_config:
         layers_nn = Flatten()(layers_nn)
     # Adding output layer
-    output = Dense(1, activation="linear")(layers_nn)
+    output = Dense(1, activation="linear", kernel_regularizer=kernel_reg)(layers_nn)
 
     model = Model(inputs=input_layer, outputs=output)
 
@@ -953,6 +978,9 @@ def nonlincausalityNN(
     epochs_num=100,
     learning_rate=0.01,
     batch_size_num=32,
+    regularization=None, 
+    reg_alpha=None,
+    callbacks=None,
     verbose=True,
     plot=False,
 ):
@@ -1000,6 +1028,12 @@ def nonlincausalityNN(
         The default is 0.01.
     batch_size_num : int, optional
         Number specifies the batch size. The default is 32.
+    regularization : str, optional
+        Name of the regularization technique to be used 'l1'/'l2'/'l1_l2'
+    reg_alpha : float or list, optional
+        regularization parameter of list of parameters if l1_l2 is used
+    callbacks : list, optional
+        List of Keras callback to be used during fitting
     verbose : bool, optional
         Specifies whether the learning process should be printed. The default is True.
     plot : bool, optional
@@ -1030,6 +1064,9 @@ def nonlincausalityNN(
         epochs_num,
         learning_rate,
         batch_size_num,
+        regularization,
+        reg_alpha,
+        callbacks,
         verbose,
         plot,
         "NN",

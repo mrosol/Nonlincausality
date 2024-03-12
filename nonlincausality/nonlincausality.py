@@ -30,10 +30,8 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_squared_error
 from itertools import combinations
 
-# from nonlincausality.utils import (
-from utils import *
-# from nonlincausality.results import ResultsNonlincausality
-from results import ResultsNonlincausality
+from nonlincausality.utils import *
+from nonlincausality.results import ResultsNonlincausality
 
 
 #%% Inside of the nonlincausality functions

@@ -89,7 +89,7 @@ class ResultsNonlincausality():
         
     @property
     def test_statistic(self):
-        return self._p_value
+        return self._test_statistic
 
     @test_statistic.setter
     def test_statistic(self, stat):

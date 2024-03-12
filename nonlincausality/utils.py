@@ -4,7 +4,7 @@ Created on Mon Jan 31 18:19:26 2022
 
 @author: Maciej Rosoł
 """
-
+from typing import Union, List
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
@@ -368,7 +368,7 @@ def prepare_data_for_prediction(x, lag, z=[]):
     return data_X, data_XY
 
 
-def prepare_data(x, x_test, lag, z, z_test):
+def prepare_data(x, x_test, lag, z, z_test, x_val, z_val):
     """
     Parameters
     ----------
@@ -400,7 +400,12 @@ def prepare_data(x, x_test, lag, z, z_test):
     # test data for model based only on X (and z if set)
     data_X_test, data_XY_test = prepare_data_for_prediction(x_test, lag, z_test)
 
-    return data_X, data_XY, data_X_test, data_XY_test
+    if len(x_val)>0:
+        data_X_val, data_XY_val = prepare_data_for_prediction(x_val, lag, z_val)
+    else: 
+        data_X_val, data_XY_val = [], []
+        
+    return data_X, data_XY, data_X_test, data_XY_test, data_X_val, data_XY_val
 
 
 #%% Calculate predictions and errors
@@ -526,7 +531,8 @@ def calculate_causality_over_time(error_X, error_XY, window, step, lag):
 
     """
     T = error_X.size
-    causality_values = pd.Series(dtype=np.float64)
+    causality_values = []
+    index = []
     analized_all = False
 
     # Calculate the causality values from the time 'window'
@@ -536,14 +542,14 @@ def calculate_causality_over_time(error_X, error_XY, window, step, lag):
             error_X[idx_error - window : idx_error],
             error_XY[idx_error - window : idx_error],
         )
-        causality_values = causality_values.append(
-            pd.Series([causality], index=[idx_error + lag - 1])
-        )
+        causality_values.append(causality)
+        index.append(idx_error+lag-1)
         # If the causality was calculated for the whole time series
         if idx_error == T:
             # There is no need for further calculations
             analized_all = True
             
+    causality_values = pd.Series(causality_values,index=index)
     # Calculations must be done for the end of the signal
     if analized_all == False:
         causality = calculate_causality(error_X[-window:], error_XY[-window:])
@@ -553,9 +559,8 @@ def calculate_causality_over_time(error_X, error_XY, window, step, lag):
         
     return causality_values
 
-
-def plot_causality_over_time_part1(
-    signal_1, signal_2, lag, length, x_test_currently_analized, causality_values
+def plot_causality_over_time(
+    signal_1:int, signal_2:int, lag:Union[int,List], length:int, x_test:np.array, causality_values_1:pd.Series, causality_values_2:pd.Series
 ):
     """
     Parameters
@@ -564,15 +569,16 @@ def plot_causality_over_time_part1(
         Number of signal from argument x, which is taken as X.
     signal_2 : int
         Number of signal from argument x, which is taken as Y.
-    lag : int
+    lag : Union[int,List]
         Number of past values used for predictions.
     length : int
         Number of samples in the tested signal.
-    x_test_currently_analized : numpy.array
+    x_test : numpy.array
         Array with X and Y test signal, which will be plotted
-    causality_values : pandas.Series
-        Values of causality change over time for given window and step.
-
+    causality_values_1 : pandas.Series
+        Values of causality change over time for given window and step for signal_1->signal_2.
+    causality_values_2 : pandas.Series
+        Values of causality change over time for given window and step for signal_2->signal_1.
     Returns
     -------
     lines : list
@@ -581,7 +587,12 @@ def plot_causality_over_time_part1(
     """
     signal_min = str(min([signal_1, signal_2]))
     signal_max = str(max([signal_1, signal_2]))
-    
+
+    x_test_currently_analized = np.zeros([x_test.shape[0], 2])
+
+    x_test_currently_analized[:, 0] = x_test[:, signal_1]
+    x_test_currently_analized[:, 1] = x_test[:, signal_2]
+
     fig = plt.figure(f"lag = {str(lag)} signals {signal_min} and {signal_max}")
     ax = fig.gca()
     # Plot of X and Y signals
@@ -604,46 +615,25 @@ def plot_causality_over_time_part1(
     ax2 = ax.twinx()
     # Make a plot with different y-axis using second axis object
     # Ploting the causality change over time for Y->X
-    line3 = ax2.plot(causality_values, "r", label="Y→X")
-    lines = line1 + line2 + line3
-    
-    return lines
-
-
-def plot_causality_over_time_part2(signal_1, signal_2, lag, causality_values, lines):
-    """
-    Parameters
-    ----------
-    signal_1 : int
-        Number of signal from argument x, which is taken as X.
-    signal_2 : int
-        Number of signal from argument x, which is taken as Y.
-    lag : int
-        Number of past values used for predictions.
-    causality_values : pandas.Series
-        Values of causality change over time for given window and step.
-    lines : list
-        List of plotted lines (used for legend display).
-
-    Returns
-    -------
-    None.
-
-    """
-    signal_min = str(min([signal_1, signal_2]))
-    signal_max = str(max([signal_1, signal_2]))
-    
-    # Choosig the figure
-    fig = plt.figure(f"lag = {str(lag)} signals {signal_min} and {signal_max}")
-    ax = fig.gca()
-    # Plotting the causality change over time for X->Y
-    line4 = ax.plot(causality_values, "g", label="X→Y")
-    # Axis for causality
-    ax.set_ylim(0, 1)
-    lines = lines + line4
-
+    line3 = ax2.plot(causality_values_1, "r", label="Y→X")
+    line4 = ax2.plot(causality_values_2, "g", label="X→Y")
+    lines = line1 + line2 + line3 + line4
     labs = [l.get_label() for l in lines]
-    ax.legend(lines, labs, loc=0)
+    ax.legend(lines, labs, loc='best')
 
-    ax.set_ylabel("Causality")
+    ax2.set_ylabel("Causality")
     plt.title("Lag = " + str(lag))
+
+def prepare_data_sklearn(x, x_test, lag, z, z_test, x_val, z_val):
+    # Preparing the input data (train and test) for 2 models
+    data_X, data_XY, data_X_test, data_XY_test, data_X_val, data_XY_val = prepare_data(
+        x, x_test, lag, z, z_test, x_val, z_val
+    )
+    data_X = data_X.reshape([data_X.shape[0],-1])
+    data_XY = data_XY.reshape([data_XY.shape[0],-1])
+    data_X_test = data_X_test.reshape([data_X_test.shape[0],-1])
+    data_XY_test = data_XY_test.reshape([data_XY_test.shape[0],-1])
+    data_X_val = data_X_val.reshape([data_X_val.shape[0],-1])
+    data_XY_val = data_XY_val.reshape([data_XY_val.shape[0],-1])
+
+    return data_X, data_XY, data_X_test, data_XY_test, data_X_val, data_XY_val

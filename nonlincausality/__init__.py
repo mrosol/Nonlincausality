@@ -7,17 +7,12 @@ contact: mrosol5@gmail.com
 """
 
 from .nonlincausality import(
-    nonlincausalityLSTM,
-    nonlincausalityGRU,
     nonlincausalityNN,
-    nonlincausalityMLP,
     nonlincausalityARIMA,
-    nonlincausalitymeasureLSTM,
-    nonlincausalitymeasureGRU,
     nonlincausalitymeasureNN,
-    nonlincausalitymeasureMLP,
     nonlincausalitymeasureARIMA,
-    plot_history_loss
+    plot_history_loss,
+    nonlincausality_sklearn
     )
 
 from .utils import (
